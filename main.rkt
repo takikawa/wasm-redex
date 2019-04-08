@@ -45,6 +45,10 @@
 
   (c    ::= number)
 
+  ;; constant numerals
+  (n    ::= integer)
+  (k    ::= integer)
+
   ;; functions
   (f    ::= (func (ex ...) tf local t ... e ...)
             (func (ex ...) tf im))
@@ -93,11 +97,29 @@
                Ev
                (label n (e ...) E)))
 
+;; helper for constructing instruction sequences
+(define-metafunction wasm-runtime-lang
+  seq : e ... -> e*
+  [(seq) ϵ]
+  [(seq e_0 e_1 ...)
+   (e_0 (seq e_1 ...))])
+
 (define wasm->
   (reduction-relation
    wasm-runtime-lang
-   (==> (unreachable ϵ) (trap ϵ))
+   ;; generally these rules need to mention the "continuation" in the sequence
+   ;; of instructions because of Redex does not allow splicing holes with a
+   ;; sequence of s-exps
+   (==> (unreachable e*) (trap e*))
    (==> (v (drop e*)) e*)
+   (==> (nop e*) e*)
+   (==> (v_1 (v_2 ((const i32 0) (select e*))))
+        (v_2 e*)
+        select-false)
+   (==> (v_1 (v_2 ((const i32 k) (select e*))))
+        (v_1 e*)
+        (side-condition (>= (term k) 1))
+        select-true)
 
    with
    [(--> (s (v ...) (in-hole E a))
@@ -125,5 +147,9 @@
                 (in-hole E (v (drop e*)))
                 (term ((const i32 42) (drop ϵ)))))
 
-  (test-wasm--> (simple-config ((const i32 42) (drop ϵ)))
-                (simple-config ϵ)))
+  (test-wasm--> (simple-config (seq (const i32 42) drop))
+                (simple-config (seq)))
+  (test-wasm--> (simple-config (seq (const i32 1) (const i32 2) (const i32 0) select))
+                (simple-config (seq (const i32 2))))
+  (test-wasm--> (simple-config (seq (const i32 1) (const i32 2) (const i32 42) select))
+                (simple-config (seq (const i32 1)))))
