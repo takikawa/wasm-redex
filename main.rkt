@@ -51,7 +51,7 @@
   (c    ::= number)
 
   ;; constant numerals
-  ((l k n) integer)
+  ((i j l k n) integer)
 
   ;; functions
   (f    ::= (func (ex ...) tf local t ... e ...)
@@ -124,29 +124,42 @@
   (test-equal (term (e*-append ((const i32 0) ϵ) (drop ϵ)))
               (term ((const i32 0) (drop ϵ)))))
 
+;; find the nesting depth of values around the hole in the eval context
 (define-metafunction wasm-runtime-lang
   v-depth : E -> number
   [(v-depth hole) 0]
-  [(v-depth (v E)) ,(add1 (term (v-depth E)))]
-  ;; TODO: case for label
-  )
+  [(v-depth (in-hole E (v hole)))
+   ,(add1 (term (v-depth E)))]
+  [(v-depth (in-hole E ((label n {e*_0} hole) e*_1)))
+   0])
 
 (module+ test
   (test-equal (term (v-depth hole)) (term 0))
   (test-equal (term (v-depth ((const i32 2) ((const i32 1) hole))))
-              (term 2)))
+              (term 2))
+  (test-equal (term (v-depth ((label 1 {ϵ} ((const i32 1) hole)) ϵ)))
+              (term 1))
+  (test-equal (term (v-depth ((const i32 2) ((label 1 {ϵ} ((const i32 1) hole)) ϵ))))
+              (term 1)))
 
+;; split an eval context into two contexts:
+;;   - an outer context surrounding the second
+;;   - an inner context with nested values around a hole
+;; precondition: E actually has l-nested values when called
 (define-metafunction wasm-runtime-lang
   v-split : E number -> (E E)
-  [(v-split E l)
-   (hole E)
-   (side-condition (= (term (v-depth E)) (term l)))]
-  [(v-split (name E_0 (v E_1)) l)
-   ((v E_outer) E_v)
-   (where (E_outer E_v) (v-split E_1 l))
-   (side-condition (> (term (v-depth E_0)) (term l)))]
-  ;; TODO: case for label
-  )
+  [(v-split hole l)
+   (hole hole)]
+  [(v-split (in-hole E (v hole)) 0)
+   ((in-hole E_outer (v hole)) hole)
+   (where (E_outer hole) (v-split E 0))]
+  [(v-split (in-hole E (v hole)) l)
+   (E_outer (in-hole E_v (v hole)))
+   (where (E_outer E_v) (v-split E ,(sub1 (term l))))]
+  [(v-split (in-hole E ((label n {e*_0} hole) e*_2)) 0)
+   ((in-hole E_outer ((label n {e*_0} hole) e*_2))
+    hole)
+   (where (E_outer hole) (v-split E 0))])
 
 (module+ test
   (test-equal (term (v-split hole 0))
@@ -154,7 +167,26 @@
   (test-equal (term (v-split ((const i32 2) ((const i32 1) hole)) 1))
               (term (((const i32 2) hole)
                      ((const i32 1) hole))))
-  )
+  (test-equal (term (v-split ((label 1 {ϵ} ((const i32 0) ((const i32 1) hole))) ϵ) 1))
+              (term (((label 1 {ϵ} ((const i32 0) hole)) ϵ)
+                     ((const i32 1) hole)))))
+
+;; find the depth of label nestings in E
+(define-metafunction wasm-runtime-lang
+  label-depth : E -> number
+  [(label-depth hole)  0]
+  [(label-depth (v E)) (label-depth E)]
+  [(label-depth ((label n {e*_0} E) e*_1))
+   ,(add1 (term (label-depth E)))])
+
+(module+ test
+  (test-equal (term (label-depth hole)) 0)
+  (test-equal (term (label-depth ((const i32 2) ((const i32 1) hole))))
+              0)
+  (test-equal (term (label-depth ((label 1 {ϵ} ((const i32 0) ((const i32 1) hole))) ϵ)))
+              1)
+  (test-equal (term (label-depth ((label 1 {ϵ} ((const i32 0) ((const i32 1) ((label 1 {ϵ} hole) ϵ)))) ϵ)))
+              2))
 
 (define wasm->
   (reduction-relation
@@ -180,6 +212,11 @@
    (==> ((label n {e*_0} trap) e*_1)
         (trap e*_1)
         label-trap)
+   (==> ((label n {e*_0} (in-hole E ((br j) e*_1))) e*_2)
+        (e*-append (in-hole E_v e*_0) e*_2)
+        (where j (label-depth E))
+        (where (E_outer E_v) (v-split E n))
+        label-br)
 
    ;; Redex can't express a pattern like n-level nestings of an
    ;; expression, so we explicitly compute the nesting depth of
@@ -249,6 +286,10 @@
                  (seq (const i32 1) (label 1 {ϵ} ((const i32 2) ϵ))))
                 (simple-config
                  (seq (const i32 1) (const i32 2))))
+  (test-wasm--> (simple-config
+                 (seq (label 1 {(drop ϵ)} (seq (label 1 {ϵ} (seq (const i32 1) (br 1)))))))
+                (simple-config
+                 (seq (const i32 1) drop)))
 
   ;; test block & related constructs
   (test-wasm--> (simple-config
