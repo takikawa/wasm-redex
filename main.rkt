@@ -195,8 +195,8 @@
    ;; of instructions because Redex does not allow splicing holes with a
    ;; sequence of s-exps
    (==> (unreachable e*) (trap e*))
-   (==> (v (drop e*)) e*)
    (==> (nop e*) e*)
+   (==> (v (drop e*)) e*)
 
    (==> (v_1 (v_2 ((const i32 0) (select e*))))
         (v_2 e*)
@@ -205,6 +205,34 @@
         (v_1 e*)
         (side-condition (>= (term k) 1))
         select-true)
+
+   ;; Redex can't express a pattern like n-level nestings of an
+   ;; expression, so we explicitly compute the nesting depth of
+   ;; values around the hole in the context E instead
+   (++> (in-hole E ((block (-> (t_1 ...) (t_2 ...)) e*_0) e*_1))
+        (in-hole E_outer (seq* (label k {ϵ} (in-hole E_v e*_0)) e*_1))
+
+        (where l             ,(length (term (t_2 ...))))
+        (where k             ,(length (term (t_1 ...))))
+        (where (E_outer E_v) (v-split E k))
+        block)
+
+   (++> (in-hole E ((name e_loop (loop (-> (t_1 ...) (t_2 ...)) e*_0)) e*_1))
+        (in-hole E_outer (seq* e_lbl e*_1))
+
+        (where e_lbl         (label l {(seq e_loop ϵ)} (in-hole E_v e*_0)))
+        (where l             ,(length (term (t_2 ...))))
+        (where k             ,(length (term (t_1 ...))))
+        (where (E_outer E_v) (v-split E k))
+        loop)
+
+   (==> ((const i32 0) ((if tf e*_1 else e*_2) e*))
+        (seq* (block tf e*_2) e*)
+        if-false)
+   (==> ((const i32 k) ((if tf e*_1 else e*_2) e*))
+        (seq* (block tf e*_1) e*)
+        (side-condition (>= (term k) 1))
+        if-true)
 
    (==> ((label n {e*_0} v*) e*_1)
         (e*-append v* e*_1)
@@ -218,25 +246,27 @@
         (where (E_outer E_v) (v-split E n))
         label-br)
 
-   ;; Redex can't express a pattern like n-level nestings of an
-   ;; expression, so we explicitly compute the nesting depth of
-   ;; values around the hole in the context E instead
-   (++> (in-hole E ((block (-> (t_1 ...) (t_2 ...)) e*_0) e*_1))
-        (in-hole E_outer (seq* (label l {ϵ} (in-hole E_v e*_0)) e*_1))
-        (where l ,(length (term (t_2 ...))))
-        (where k ,(length (term (t_1 ...))))
-        (where (E_outer E_v) (v-split E k))
-        block)
-
-   ;; TODO: loop
-
-   (==> ((const i32 0) ((if tf e*_1 else e*_2) e*))
-        (seq* (block tf e*_2) e*)
-        if-false)
-   (==> ((const i32 k) ((if tf e*_1 else e*_2) e*))
-        (seq* (block tf e*_1) e*)
+   (==> ((const i32 0) ((br-if j) e*))
+        e*
+        br-if-false)
+   (==> ((const i32 k) ((br-if j) e*))
+        (seq (br j) e*)
         (side-condition (>= (term k) 1))
-        if-true)
+        br-if-true)
+
+   ;; TODO: br-table
+
+   ;; TODO: call, call-indirect
+
+   ;; TODO: local
+
+   ;; TODO: get-local, set-local, tee-local
+
+   ;; TODO: get-global, set-global
+
+   ;; TODO: load, store
+
+   ;; TODO: current-memory, grow-memory 
 
    with
    [(--> (s (v ...) (in-hole E a))
