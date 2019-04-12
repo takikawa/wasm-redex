@@ -94,10 +94,9 @@
   ;; evaluation contexts
   ;; using an inductive definition instead of using sequences because
   ;; we would need splicing holes otherwise
-  (Ev      ::= hole
-               (v Ev))
-  (E       ::= Ev
-               (label n (e ...) E)))
+  (E       ::= hole
+               (v E)
+               ((label n (e*) E) e*)))
 
 ;; helper for constructing instruction sequences
 (define-metafunction wasm-runtime-lang
@@ -258,4 +257,6 @@
                  (seq (const i32 1) (label 1 {ϵ} ((const i32 2) ϵ)))))
   (test-wasm-->> (simple-config (seq (const i32 1) (const i32 2) (block (-> (i32) (i32)) ϵ)))
                  (simple-config (seq (const i32 1) (const i32 2))))
+  (test-wasm-->> (simple-config (seq (const i32 1) (block (-> (i32) (i32)) (seq drop))))
+                 (simple-config (seq)))
   )
