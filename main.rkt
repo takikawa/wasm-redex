@@ -254,7 +254,14 @@
         (side-condition (>= (term k) 1))
         br-if-true)
 
-   ;; TODO: br-table
+   (==> ((const i32 k) ((br-table i_1 ... i i_2 ...) e*))
+        (seq* (br i) e*)
+        (side-condition (= (length (term (i_1 ...))) (term k)))
+        br-table-index)
+   (==> ((const i32 k) ((br-table i_1 ... i) e*))
+        (seq* (br i) e*)
+        (side-condition (>= (term k) (length (term (i_1 ...)))))
+        br-table-end)
 
    ;; TODO: call, call-indirect
 
@@ -330,4 +337,15 @@
                  (simple-config (seq (const i32 1) (const i32 2))))
   (test-wasm-->> (simple-config (seq (const i32 1) (block (-> (i32) (i32)) (seq drop))))
                  (simple-config (seq)))
+
+  ;; test branches
+  (test-wasm--> (simple-config
+                 (seq (const i32 1) (br-table 0 1 2)))
+                (simple-config (seq (br 1))))
+  (test-wasm--> (simple-config
+                 (seq (const i32 2) (br-table 0 1 2)))
+                (simple-config (seq (br 2))))
+  (test-wasm--> (simple-config
+                 (seq (const i32 3) (br-table 0 1 2)))
+                (simple-config (seq (br 2))))
   )
