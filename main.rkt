@@ -191,6 +191,10 @@
 (define wasm->
   (reduction-relation
    wasm-runtime-lang
+   (--> (s (v ...) (in-hole E trap))
+        (s (v ...) trap)
+        trap)
+
    ;; generally these rules need to mention the "continuation" in the sequence
    ;; of instructions because Redex does not allow splicing holes with a
    ;; sequence of s-exps
