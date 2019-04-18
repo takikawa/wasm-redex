@@ -54,7 +54,7 @@
   ((i j l k n) integer)
 
   ;; functions
-  (f    ::= (func (ex ...) tf local t ... e ...)
+  (f    ::= (func (ex ...) tf local (t ...) e*)
             (func (ex ...) tf im))
   (glob ::= (global (ex ...) tg e ...)
             (global (ex ...) tg im))
@@ -196,6 +196,8 @@
 (define wasm->
   (reduction-relation
    wasm-runtime-lang
+   #:domain (s F e* i)
+
    (--> (s F (trap (e e*)) i)
         (s F (trap ϵ) i)
         trap)
