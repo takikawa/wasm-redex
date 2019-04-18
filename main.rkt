@@ -1,5 +1,9 @@
 #lang racket
 
+;; This is a redex model of the semantics of webassembly from the paper
+;;   "Bringing the Web up to Speed with WebAssembly"
+;;   Haas et al.
+
 (require redex)
 
 (define-language wasm-lang
