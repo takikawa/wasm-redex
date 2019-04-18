@@ -8,44 +8,65 @@
 
 (define-language wasm-lang
   ;; types
-  (t  ::= i32 i64 f32 f64)
-  (tp ::= i8 i16 i32)
-  (tf ::= (-> (t ...) (t ...)))
-  (tg ::= t (mut t))
+  (t   ::= t-i t-f)
+  (t-f ::= f32 f64)
+  (t-i ::= i32 i64)
+  (tp  ::= i8 i16 i32)
+  (tf  ::= (-> (t ...) (t ...)))
+  (tg  ::= t (mut t))
 
   ;; instructions
   (e-no-v ::= unreachable
-         nop
-         drop
-         select
-         (block tf e*)
-         (loop tf e*)
-         (if tf e* else e*)
-         (br i)
-         (br-if i)
-         (br-table i i ...)
-         return
-         (call i)
-         (call-indirect tf)
-         (get-local i)
-         (set-local i)
-         (tee-local i)
-         (get-global i)
-         (set-global i)
-         (load t a o)
-         (load t tp-sx a o)
-         (store t a o)
-         (store t tp a o)
-         current-memory
-         grow-memory
-         unop-i32
-         unop-i64
-         unop-f32
-         unop-f64
-         ;; FIXME: there are more ops
-         )
+              nop
+              drop
+              select
+              (block tf e*)
+              (loop tf e*)
+              (if tf e* else e*)
+              (br i)
+              (br-if i)
+              (br-table i i ...)
+              return
+              (call i)
+              (call-indirect tf)
+              (get-local i)
+              (set-local i)
+              (tee-local i)
+              (get-global i)
+              (set-global i)
+              (load t a o)
+              (load t tp-sx a o)
+              (store t a o)
+              (store t tp a o)
+              current-memory
+              grow-memory
+              ;; prim ops become a little verbose due to type constraints
+              (unop-i t-i)
+              (unop-f t-f)
+              (binop-i t-i)
+              (binop-f t-f)
+              (testop-i t-i)
+              (relop-i t-i)
+              (relop-f t-f)
+              (cvtop t)
+              (cvtop t t-sx))
   (e    ::= e-no-v
             (const t c))
+
+  ;; primitive operations
+  [unop     :: unop-i unop-f]
+  (unop-i   ::= clz ctz popcnt)
+  (unop-f   ::= neg abs ceil floor trunc nearest sqrt)
+  [binop    ::= binop-i binop-f]
+  (binop-i  ::= add sub mul div-s div-u rem-s rem-u and
+                or xor shl shr-s shr-u rotl rotr)
+  (binop-f  ::= add sub mul div min max copysign)
+  (testop   ::= testop-i)
+  (testop-i ::= eqz)
+  (relop    ::= relop-i relop-f)
+  (relop-i  ::= eq ne lt-u lt-s gt-u gt-s le-u le-s ge-u ge-s)
+  (relop-f  ::= eq ne lt gt le ge)
+  (cvtop    ::= convert reinterpret)
 
   ;; sequences of expressions
   ;; (we use this to avoid splicing)
@@ -249,6 +270,40 @@
   [(v*->F-helper ϵ F) F]
   [(v*->F-helper (v v*) (v_acc ...)) (v_acc ... v)])
 
+;; implement primitives
+(define-metafunction wasm-runtime-lang
+  do-unop : unop t c -> c
+  ;; TODO: integer ops
+  [(do-unop neg t-f c) ,(- (term c))]
+  [(do-unop abs t-f c) ,(abs (term c))]
+  [(do-unop ceil t-f c) ,(ceiling (term c))]
+  [(do-unop floor t-f c) ,(floor (term c))]
+  [(do-unop trunc t-f c) ,(truncate (term c))]
+  [(do-unop nearest t-f c) ,(round (term c))]
+  [(do-unop sqrt t-f c) ,(sqrt (term c))])
+
+(define-metafunction wasm-runtime-lang
+  do-binop : binop t c c -> c
+  ;; TODO: should handle overflow and such more properly
+  [(do-binop add t c_1 c_2) ,(+ (term c_1) (term c_2))]
+  [(do-binop sub t c_1 c_2) ,(- (term c_1) (term c_2))]
+  [(do-binop mul t c_1 c_2) ,(* (term c_1) (term c_2))]
+  [(do-binop and t-i c_1 c_2) ,(bitwise-and (term c_1) (term c_2))]
+  [(do-binop or t-i c_1 c_2) ,(bitwise-ior (term c_1) (term c_2))]
+  ;; TODO: more ops
+  )
+
+(define-metafunction wasm-runtime-lang
+  do-testop : testop t c -> c
+  [(do-testop eqz t-i 0) 1]
+  [(do-testop eqz t-i c) 0])
+
+(define-metafunction wasm-runtime-lang
+  do-relop : relop t c c -> c
+  ;; TODO: integer ops
+  [(do-relop eq t c_1 c_2) ,(if (= (term c_1) (term c_2)) 1 0)]
+  [(do-relop ne t c_1 c_2) ,(if (= (term c_1) (term c_2)) 0 1)])
+
 (define wasm->
   (reduction-relation
    wasm-runtime-lang
@@ -261,6 +316,28 @@
         (s F (trap ϵ) i)
         (side-condition (not (redex-match wasm-runtime-lang hole (term E))))
         trap-context)
+
+   (==> ((const t c) ((unop t) e*))
+        ((const t (do-unop unop t c)) e*)
+        unop)
+
+   (==> ((const t c_1) ((const t c_2) ((binop t) e*)))
+        ((const t c) e*)
+        (where c (do-binop binop t c_1 c_2))
+        binop)
+   (==> ((const t c_1) ((const t c_2) ((binop t) e*)))
+        (trap e*)
+        binop-trap)
+
+   (==> ((const t c) ((testop t) e*))
+        ((const i32 (do-testop testop t c)) e*)
+        testop)
+
+   (==> ((const t c_1) ((const t c_2) ((relop t) e*)))
+        ((const i32 (do-relop relop t c_1 c_2)) e*)
+        relop)
+
+   ;; TODO: convert / reinterpret
 
    ;; generally these rules need to mention the "continuation" in the sequence
    ;; of instructions because Redex does not allow splicing holes with a
@@ -480,6 +557,14 @@
    (redex-match wasm-runtime-lang
                 (in-hole E (v (drop e*)))
                 (term ((const i32 42) (drop ϵ)))))
+
+  ;; test primitives
+  (test-wasm--> (simple-config (seq (const f32 42.0) (neg f32)))
+                (simple-config (seq (const f32 -42.0))))
+  (test-wasm--> (simple-config (seq (const i32 42) (eqz i32)))
+                (simple-config (seq (const i32 0))))
+  (test-wasm--> (simple-config (seq (const i32 42) (const i32 42) (ne i32)))
+                (simple-config (seq (const i32 0))))
 
   ;; test drop & select
   (test-wasm--> (simple-config (seq (const i32 42) drop))
