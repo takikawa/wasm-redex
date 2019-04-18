@@ -193,6 +193,58 @@
   (test-equal (term (label-depth ((label 1 {ϵ} ((const i32 0) ((const i32 1) ((label 1 {ϵ} hole) ϵ)))) ϵ)))
               2))
 
+;; extract a closure out of the func part of store
+(define-metafunction wasm-runtime-lang
+  store-func : s i j -> cl
+  [(store-func {(modinst_0 ... modinst modinst_1 ...) any_0 ...} i j)
+   cl
+   (side-condition (= (length (term (modinst_0 ...))) (term i)))
+   (where {(func cl_0 ... cl cl_1 ...) any_1 ...} modinst)
+   (side-condition (= (length (term (cl_0 ...))) (term j)))])
+
+(module+ test
+  (let ()
+    (define f1 (term (func () (-> () ()) local () (seq nop))))
+    (define modinst1 (term {(func {(inst 0) (code ,f1)}) (global)}))
+    (test-equal (term (store-func {(,modinst1) () ()} 0 0))
+                (term {(inst 0) (code ,f1)}))))
+
+;; extract a closure from the tab part of store
+(define-metafunction wasm-runtime-lang
+  store-tab : s i j -> cl
+  [(store-tab {any (tabinst_0 ... tabinst tabinst_1 ...) any_0 ...} i j)
+   cl
+   (side-condition (= (length (term (tabinst_0 ...))) (term i)))
+   (where (cl_0 ... cl cl_1 ...) tabinst)
+   (side-condition (= (length (term (cl_0 ...))) (term j)))])
+
+;; extract the code from a closure
+(define-metafunction wasm-runtime-lang
+  cl-code : cl -> f
+  [(cl-code {any (code f)}) f])
+
+;; extract the instance index from a closure
+(define-metafunction wasm-runtime-lang
+  cl-inst : cl -> i
+  [(cl-inst {(inst i) any}) i])
+
+;; append two Fs together
+(define-metafunction wasm-runtime-lang
+  F-append : F F -> F
+  [(F-append () F) F]
+  [(F-append (v_1 ... v) (v_2 ...))
+   (F-append (v_1 ...) (v v_2 ...))])
+
+;; convert a nested v* to a (v ...), uses accumulator
+(define-metafunction wasm-runtime-lang
+  v*->F : v* -> F
+  [(v*->F v*) (v*->F-helper v* ())])
+
+(define-metafunction wasm-runtime-lang
+  v*->F-helper : v* F -> F
+  [(v*->F-helper ϵ F) F]
+  [(v*->F-helper (v v*) (v_acc ...)) (v_acc ... v)])
+
 (define wasm->
   (reduction-relation
    wasm-runtime-lang
@@ -278,11 +330,30 @@
         (side-condition (>= (term k) (length (term (i_1 ...)))))
         br-table-end)
 
-   #;
-   (--> (s (v ...) (in-hole E ((call j) e*)))
-        (s (v ...) (in-hole E ((call (s-func s i j)) e*)))
+   (--> (s F (in-hole E ((call j) e*)) i)
+        (s F (in-hole E ((call (store-func s i j)) e*)) i)
         call-index)
-   ;; TODO: call, call-indirect
+
+   (--> (s F (in-hole E ((const i32 j) ((call-indirect tf) e*))) i)
+        (s F (in-hole E ((call cl) e*)) i)
+        (where cl (store-tab s i j))
+        (where (func tf local (t ...) e*) (cl-code cl))
+        call-indirect)
+
+   ;; implicit side-condition: pattern match from previous case failed
+   (--> (s F (in-hole E ((const i32 j) ((call-indirect tf) e*))) i)
+        (s F (in-hole E (trap e*)) i)
+        call-indirect-trap)
+
+   (++> (in-hole E ((call cl) e*_0))
+        (in-hole E_outer ((local l {(cl-inst cl) F} e*_block) e*_0))
+        (where (func () (-> (t_1 ...) (t_2 ...)) local (t ...) e*_code) (cl-code cl))
+        (where n ,(length (term (t_1 ...))))
+        (where l ,(length (term (t_2 ...))))
+        (where (E_outer E_v) (v-split E n))
+        (where F (F-append (v*->F (in-hole E_v ϵ)) ((const t 0) ...)))
+        (where e*_block (seq (block (-> () (t_2 ...)) e*_code)))
+        call-closure)
 
    (==> ((local n {i F} v*) e*)
         (e*-append v* e*)
@@ -375,6 +446,25 @@
   (define-syntax-rule (simple-config e*)
     (term (,mt-s () e* 0)))
 
+  (define f-0
+    (term (func () (-> (i32) (i32)) local () (seq (const i32 0)))))
+  (define cl-0
+    (term {(inst 0) (code ,f-0)}))
+  (define modinst-0
+    (term {(func ,cl-0) (global)}))
+  (define modinst-1
+    (term {(func) (global)}))
+  (define tabinst-0
+    (term ()))
+  (define tabinst-1
+    (term ()))
+  (define test-store
+    (term {(,modinst-0 ,modinst-1)
+           (,tabinst-0 ,tabinst-1)
+           ()}))
+  (define-syntax-rule (test-config e*)
+    (term (,test-store () e* 0)))
+
   ;; sanity checks for the grammar
   (check-not-false
    (redex-match wasm-runtime-lang s mt-s))
@@ -461,4 +551,7 @@
                          (seq (get-local 1) return (get-local 2)))
                        drop))
                  (simple-config (seq)))
+
+  (test-wasm-->> (test-config (seq (call 0)))
+                 (test-config (seq (const i32 0))))
   )
