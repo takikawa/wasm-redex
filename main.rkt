@@ -75,17 +75,22 @@
                trap
                (call cl)
                (label n {e*} e*)
-               (local n {i v ...} e*))
+               (local n {i (v ...)} e*))
 
   ;; runtime
   (s       ::= {(modinst ...) (tabinst ...) (meminst ...)})
-  (modinst ::= {(func cl ...) (glob v ...)}
-               {(func cl ...) (glob v ...) (tab i)}
-               {(func cl ...) (glob v ...) (mem i)}
-               {(func cl ...) (glob v ...) (tab i) (mem i)})
+  (modinst ::= {(func cl ...) (global v ...)}
+               {(func cl ...) (global v ...) (tab i)}
+               {(func cl ...) (global v ...) (mem i)}
+               {(func cl ...) (global v ...) (tab i) (mem i)})
   (tabinst ::= (cl ...))
   (meminst ::= (b ...))
   (cl      ::= {(inst i) (code f)})
+
+  (F       ::= (v ...))
+  ;; this is needed for the actual spec
+  #;
+  (F       ::= {(locals v ...) (module modinst)})
 
   (v       ::= (const t c))
   (v*      ::= ϵ
@@ -191,9 +196,13 @@
 (define wasm->
   (reduction-relation
    wasm-runtime-lang
-   (--> (s (v ...) (in-hole E trap))
-        (s (v ...) trap)
+   (--> (s F (trap (e e*)) i)
+        (s F (trap ϵ) i)
         trap)
+   (--> (s F (in-hole E (trap e*)) i)
+        (s F (trap ϵ) i)
+        (side-condition (not (redex-match wasm-runtime-lang hole (term E))))
+        trap-context)
 
    ;; generally these rules need to mention the "continuation" in the sequence
    ;; of instructions because Redex does not allow splicing holes with a
@@ -267,24 +276,88 @@
         (side-condition (>= (term k) (length (term (i_1 ...)))))
         br-table-end)
 
+   #;
+   (--> (s (v ...) (in-hole E ((call j) e*)))
+        (s (v ...) (in-hole E ((call (s-func s i j)) e*)))
+        call-index)
    ;; TODO: call, call-indirect
 
-   ;; TODO: local
+   (==> ((local n {i F} v*) e*)
+        (e*-append v* e*)
+        local-value)
 
-   ;; TODO: get-local, set-local, tee-local
+   (==> ((local n {i F} (trap e*_0)) e*_1)
+        (trap ϵ)
+        local-trap)
 
-   ;; TODO: get-global, set-global
+   (==> ((local n {i F} (in-hole E (return e*_0))) e*_1)
+        (in-hole E_v e*_1)
+        (where (E_outer E_v) (v-split E n))
+        local-return)
 
-   ;; TODO: load, store
+   ;; specifies how to reduce inside a local/frame instruction via a
+   ;; recursive use of the reduction relation
+   (--> (s_0 F_0 (in-hole E ((local n {i F_1} e*_0) e*_2)) j)
+        (s_1 F_0 (in-hole E ((local n {i F_2} e*_1) e*_2)) j)
+        ;; apply --> recursively
+        (where any_rec ,(apply-reduction-relation wasm-> (term (s_0 F_1 e*_0 i))))
+        ;; only apply this rule if this reduction was valid
+        (side-condition (not (null? (term any_rec))))
+        ;; the relation should be deterministic, so just take the first
+        (where (s_1 F_2 e*_1 i) ,(first (term any_rec)))
+        frame-reduction)
 
-   ;; TODO: current-memory, grow-memory 
+   ;; reductions for operating on locals in frames
+   (--> (s (name F (v_1 ... v v_2 ...)) (in-hole E ((get-local j) e*)) i)
+        (s F (in-hole E (v e*)) i)
+        (side-condition (= (length (term (v_1 ...))) (term j)))
+        get-local)
+
+   (--> (s (v_1 ... v v_2 ...) (in-hole E (v_new ((set-local j) e*))) i)
+        (s (v_1 ... v_new v_2 ...) (in-hole E e*) i)
+        (side-condition (= (length (term (v_1 ...))) (term j)))
+        set-local)
+
+   (==> (v ((tee-local j) e*))
+        (v (v ((set-local j) e*)))
+        tee-local)
+
+   ;; reductions for operating on global store data
+   (--> (s F (in-hole E ((get-global j) e*)) i)
+        (s F (in-hole E ((read-glob s i j) e*)) i)
+        get-global)
+
+   (--> (s F (in-hole E (v ((set-global j) e*))) i)
+        (s_new F (in-hole E e*) i)
+        (where s_new (write-glob s i j v))
+        set-global)
+
+   ;; reductions for operating on memory
+   (--> (s F (in-hole E ((const i32 k) ((load t a o) e*))) i)
+        ;; TODO: define reinterpret
+        (s F (in-hole E ((const t (reinterpret t b)) e*)) i)
+        (where b (s-mem i ,(+ (term k) (term o))))
+        load)
+   ;; TODO: load tp-sx case, store
+
+   (--> (s F (in-hole E (current-memory e*)) i)
+        ;; TODO: define memory-size
+        (s F (in-hole E ((const i32 (memory-size s i)) e*)) i)
+        current-memory)
+
+   ;; TODO: fail case
+   (--> (s F (in-hole E ((const i32 k) (grow-memory e*))) i)
+        (s_new F (in-hole E ((const i32 j_newsize) e*)) i)
+        ;; TODO: define expand-memory
+        (where (s_new j_newsize) (expand-memory s i k))
+        grow-memory)
 
    with
-   [(--> (s (v ...) (in-hole E a))
-         (s (v ...) (in-hole E b)))
+   [(--> (s F (in-hole E a) i)
+         (s F (in-hole E b) i))
     (==> a b)]
-   [(--> (s (v ...) a)
-         (s (v ...) b))
+   [(--> (s F a i)
+         (s F b i))
     (++> a b)]))
 
 (module+ test
@@ -297,12 +370,14 @@
 
   ;; test helpers and terms
   (define mt-s (term {() () ()}))
-  (define-syntax-rule (simple-config e)
-    (term (,mt-s () e)))
+  (define-syntax-rule (simple-config e*)
+    (term (,mt-s () e* 0)))
 
   ;; sanity checks for the grammar
   (check-not-false
    (redex-match wasm-runtime-lang s mt-s))
+  (check-not-false
+   (redex-match wasm-runtime-lang F (second (simple-config ϵ))))
   (check-not-false
    (redex-match wasm-runtime-lang v (term (const i32 42))))
   (check-not-false
@@ -352,4 +427,36 @@
   (test-wasm--> (simple-config
                  (seq (const i32 3) (br-table 0 1 2)))
                 (simple-config (seq (br 2))))
+
+  ;; test frames / function calls / access to locals
+  (test-wasm--> (simple-config
+                 (seq (local 1 {1 ((const i32 1) (const i32 2) (const i32 3))}
+                        (seq (get-local 1)))))
+                (simple-config
+                 (seq (local 1 {1 ((const i32 1) (const i32 2) (const i32 3))}
+                        (seq (const i32 2))))))
+  (test-wasm-->> (simple-config
+                  (seq (local 1 {1 ((const i32 1) (const i32 2) (const i32 3))}
+                         (seq (get-local 1)))))
+                 (simple-config
+                  (seq (const i32 2))))
+  (test-wasm-->> (simple-config
+                  (seq (local 1 {1 ((const i32 1) (const i32 2) (const i32 3))}
+                         (seq (const i32 42) (tee-local 1)))))
+                 (simple-config
+                  (seq (const i32 42))))
+  (test-wasm-->> (simple-config
+                  (seq (local 1 {1 ((const i32 1) (const i32 2) (const i32 3))}
+                         (seq trap (get-local 1)))))
+                 (simple-config (seq trap)))
+  (test-wasm-->> (simple-config
+                  (seq (local 1 {1 ((const i32 1) (const i32 2) (const i32 3))}
+                         (seq (get-local 1) return (get-local 2)))))
+                 (simple-config
+                  (seq (const i32 2))))
+  (test-wasm-->> (simple-config
+                  (seq (local 1 {1 ((const i32 1) (const i32 2) (const i32 3))}
+                         (seq (get-local 1) return (get-local 2)))
+                       drop))
+                 (simple-config (seq)))
   )
