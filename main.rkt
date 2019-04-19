@@ -548,24 +548,30 @@
                                          (sub i32)
                                          (set-local 0)
                                          (br 1)))))))))
+  (define f-2
+    (term (func () (-> (i32) (i32)) local ()
+                (seq (const i32 5) (call 1)
+                     (get-local 0) (mul i32)))))
   (define cl-0
     (term {(inst 0) (code ,f-0)}))
   (define cl-1
     (term {(inst 0) (code ,fact-loop)}))
+  (define cl-2
+    (term {(inst 0) (code ,f-2)}))
   (define modinst-0
-    (term {(func ,cl-0 ,cl-1) (global)}))
+    (term {(func ,cl-0 ,cl-1 ,cl-2) (global)}))
   (define modinst-1
     (term {(func) (global)}))
   (define tabinst-0
     (term ()))
   (define tabinst-1
     (term ()))
-  (define test-store
+  (define func-store
     (term {(,modinst-0 ,modinst-1)
            (,tabinst-0 ,tabinst-1)
            ()}))
-  (define-syntax-rule (test-config e*)
-    (term (,test-store () e* 0)))
+  (define-syntax-rule (func-config e*)
+    (term (,func-store () e* 0)))
 
   ;; sanity checks for the grammar
   (check-not-false
@@ -662,10 +668,12 @@
                        drop))
                  (simple-config (seq)))
 
-  (test-wasm-->> (test-config (seq (call 0)))
-                 (test-config (seq (const i32 0))))
+  (test-wasm-->> (func-config (seq (call 0)))
+                 (func-config (seq (const i32 0))))
 
   ;; call factorial of 5
-  (test-wasm-->> (test-config (seq (const i32 5) (call 1)))
-                 (test-config (seq (const i32 120))))
+  (test-wasm-->> (func-config (seq (const i32 5) (call 1)))
+                 (func-config (seq (const i32 120))))
+  (test-wasm-->> (func-config (seq (const i32 2) (call 2)))
+                 (func-config (seq (const i32 240))))
   )
