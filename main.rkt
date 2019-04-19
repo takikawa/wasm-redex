@@ -368,10 +368,10 @@
    (++> (in-hole E ((name e_loop (loop (-> (t_1 ...) (t_2 ...)) e*_0)) e*_1))
         (in-hole E_outer (seq* e_lbl e*_1))
 
-        (where e_lbl         (label l {(seq e_loop ϵ)} (in-hole E_v e*_0)))
         (where l             ,(length (term (t_2 ...))))
         (where k             ,(length (term (t_1 ...))))
         (where (E_outer E_v) (v-split E k))
+        (where e_lbl         (label l {(seq e_loop)} (in-hole E_v e*_0)))
         loop)
 
    (==> ((const i32 0) ((if tf e*_1 else e*_2) e*))
@@ -528,11 +528,32 @@
     (term (,mt-s () e* 0)))
 
   (define f-0
-    (term (func () (-> (i32) (i32)) local () (seq (const i32 0)))))
+    (term (func () (-> () (i32)) local () (seq (const i32 0)))))
+  (define fact-loop
+    (term (func () (-> (i32) (i32)) local (i32)
+                (seq (const i32 1)
+                     (set-local 1)
+                     (loop (-> () ())
+                           (seq (get-local 0)
+                                (eqz i32)
+                                (if (-> () ())
+                                    (seq (get-local 1) return)
+                                    else
+                                    (seq (get-local 0)
+                                         (get-local 1)
+                                         (mul i32)
+                                         (set-local 1)
+                                         (get-local 0)
+                                         (const i32 1)
+                                         (sub i32)
+                                         (set-local 0)
+                                         (br 1)))))))))
   (define cl-0
     (term {(inst 0) (code ,f-0)}))
+  (define cl-1
+    (term {(inst 0) (code ,fact-loop)}))
   (define modinst-0
-    (term {(func ,cl-0) (global)}))
+    (term {(func ,cl-0 ,cl-1) (global)}))
   (define modinst-1
     (term {(func) (global)}))
   (define tabinst-0
@@ -643,4 +664,8 @@
 
   (test-wasm-->> (test-config (seq (call 0)))
                  (test-config (seq (const i32 0))))
+
+  ;; call factorial of 5
+  (test-wasm-->> (test-config (seq (const i32 5) (call 1)))
+                 (test-config (seq (const i32 120))))
   )
