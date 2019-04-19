@@ -4,7 +4,9 @@
 ;;   "Bringing the Web up to Speed with WebAssembly"
 ;;   Haas et al.
 
-(require redex)
+(require redex
+         pict
+         pict/snip)
 
 (define-language wasm-lang
   ;; types
@@ -323,6 +325,72 @@
   [(do-relop eq t c_1 c_2) ,(if (= (term c_1) (term c_2)) 1 0)]
   [(do-relop ne t c_1 c_2) ,(if (= (term c_1) (term c_2)) 0 1)])
 
+;; helpers for pretty printing / drawing as stack picts
+(define (pp/pict state port width text)
+  (redex-let
+   wasm-runtime-lang
+   ([{s F e* i} state])
+   (define p (term->pict (term e*)))
+   (send text insert (new pict-snip% [pict p]))))
+
+(define (stack-pict str)
+  (cc-superimpose
+   (filled-rectangle 100 50
+                     #:color "white"
+                     #:border-color "black")
+   (text str)))
+
+(define (indent pict)
+  (hc-append (blank 30 1) pict))
+
+(define term->pict
+  (term-match/single
+   wasm-runtime-lang
+   [((const t c) e*)
+    (let ()
+      (define str (format "(~a.const ~a)" (term t) (term c)))
+      (vc-append (stack-pict str)
+                 (term->pict (term e*))))]
+   [((call cl) e*)
+    (let ()
+      (vc-append (stack-pict "(call #<closure>)")
+                 (term->pict (term e*))))]
+   [((label n {e*_0} e*_1) e*_2)
+    (let ()
+      (vc-append (stack-pict (~a "label " (term n)))
+                 (indent (term->pict (term e*_1)))
+                 (term->pict (term e*_2))))]
+   [((local n {i F} e*_1) e*_2)
+    (let ()
+      (vc-append (stack-pict (format "local ~a ~a" (term n) (term i)))
+                 (indent (term->pict (term e*_1)))
+                 (term->pict (term e*_2))))]
+   [((block tf e*_1) e*_2)
+    (let ()
+      (vc-append (stack-pict (format "block ~a" (term tf)))
+                 (indent (term->pict (term e*_1)))
+                 (term->pict (term e*_2))))]
+   [((loop tf e*_1) e*_2)
+    (let ()
+      (vc-append (stack-pict (format "loop ~a" (term tf)))
+                 (indent (term->pict (term e*_1)))
+                 (term->pict (term e*_2))))]
+   [((if tf e*_0 else e*_1) e*_2)
+    (let ()
+      (vc-append (stack-pict (format "if ~a" (term tf)))
+                 (indent (term->pict (term e*_0)))
+                 (stack-pict (format "then"))
+                 (indent (term->pict (term e*_1)))
+                 (term->pict (term e*_2))))]
+   [(e e*)
+    (vc-append (stack-pict (format "~a" (term e)))
+               (term->pict (term e*)))]
+   [ϵ (blank 0 0)]))
+
+(define-syntax-rule (wasm-pp-traces t)
+  (traces wasm-> #:pp pp/pict t))
+
+;; the actual reduction relation starts here
 (define wasm->
   (reduction-relation
    wasm-runtime-lang
