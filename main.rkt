@@ -243,6 +243,25 @@
    (where (cl_0 ... cl cl_1 ...) tabinst)
    (side-condition (= (length (term (cl_0 ...))) (term j)))])
 
+;; read a global value
+(define-metafunction wasm-runtime-lang
+  store-glob : s i j -> v
+  [(store-glob {(modinst_0 ... modinst modinst_1 ...) any_0 ...} i j)
+   v
+   (side-condition (= (length (term (modinst_0 ...))) (term i)))
+   (where {any_f (global v_0 ... v v_1 ...) any_1 ...} modinst)
+   (side-condition (= (length (term (v_0 ...))) (term j)))])
+
+;; write a global value
+(define-metafunction wasm-runtime-lang
+  store-glob= : s i j v -> s
+  [(store-glob= {(modinst_0 ... modinst modinst_1 ...) any_0 ...} i j v_new)
+   {(modinst_0 ... modinst_new modinst_1 ...) any_0 ...}
+   (side-condition (= (length (term (modinst_0 ...))) (term i)))
+   (where {any_f (global v_0 ... v v_1 ...) any_1 ...} modinst)
+   (side-condition (= (length (term (v_0 ...))) (term j)))
+   (where modinst_new {any_f (global v_0 ... v_new v_1 ...) any_1 ...})])
+
 ;; extract the code from a closure
 (define-metafunction wasm-runtime-lang
   cl-code : cl -> f
@@ -478,12 +497,12 @@
 
    ;; reductions for operating on global store data
    (--> (s F (in-hole E ((get-global j) e*)) i)
-        (s F (in-hole E ((read-glob s i j) e*)) i)
+        (s F (in-hole E ((store-glob s i j) e*)) i)
         get-global)
 
    (--> (s F (in-hole E (v ((set-global j) e*))) i)
         (s_new F (in-hole E e*) i)
-        (where s_new (write-glob s i j v))
+        (where s_new (store-glob= s i j v))
         set-global)
 
    ;; reductions for operating on memory
@@ -517,61 +536,28 @@
 (module+ test
   (require rackunit)
 
+  (define (wasm-eval a-term)
+    (define results (apply-reduction-relation* wasm-> a-term))
+    (unless (= (length results) 1)
+      (error "wasm-> had non-deterministic evaluation or no result"))
+    (define result (first results))
+    (redex-let wasm-runtime-lang
+               ([{s F (v ϵ) i} (first results)])
+               (term v)))
+
   (define-syntax-rule (test-wasm--> x y)
     (test--> wasm-> x y))
   (define-syntax-rule (test-wasm-->> x y)
     (test-->> wasm-> x y))
 
+  ;; for testing with side effects
+  (define-syntax-rule (test-wasm-eval x y)
+    (test-equal (wasm-eval x) y))
+
   ;; test helpers and terms
   (define mt-s (term {() () ()}))
   (define-syntax-rule (simple-config e*)
     (term (,mt-s () e* 0)))
-
-  (define f-0
-    (term (func () (-> () (i32)) local () (seq (const i32 0)))))
-  (define fact-loop
-    (term (func () (-> (i32) (i32)) local (i32)
-                (seq (const i32 1)
-                     (set-local 1)
-                     (loop (-> () ())
-                           (seq (get-local 0)
-                                (eqz i32)
-                                (if (-> () ())
-                                    (seq (get-local 1) return)
-                                    else
-                                    (seq (get-local 0)
-                                         (get-local 1)
-                                         (mul i32)
-                                         (set-local 1)
-                                         (get-local 0)
-                                         (const i32 1)
-                                         (sub i32)
-                                         (set-local 0)
-                                         (br 1)))))))))
-  (define f-2
-    (term (func () (-> (i32) (i32)) local ()
-                (seq (const i32 5) (call 1)
-                     (get-local 0) (mul i32)))))
-  (define cl-0
-    (term {(inst 0) (code ,f-0)}))
-  (define cl-1
-    (term {(inst 0) (code ,fact-loop)}))
-  (define cl-2
-    (term {(inst 0) (code ,f-2)}))
-  (define modinst-0
-    (term {(func ,cl-0 ,cl-1 ,cl-2) (global)}))
-  (define modinst-1
-    (term {(func) (global)}))
-  (define tabinst-0
-    (term ()))
-  (define tabinst-1
-    (term ()))
-  (define func-store
-    (term {(,modinst-0 ,modinst-1)
-           (,tabinst-0 ,tabinst-1)
-           ()}))
-  (define-syntax-rule (func-config e*)
-    (term (,func-store () e* 0)))
 
   ;; sanity checks for the grammar
   (check-not-false
@@ -668,12 +654,90 @@
                        drop))
                  (simple-config (seq)))
 
-  (test-wasm-->> (func-config (seq (call 0)))
-                 (func-config (seq (const i32 0))))
+  ;; test function calls with factorial
+  (let ()
+    (define f-0
+      (term (func () (-> () (i32)) local () (seq (const i32 0)))))
+    (define fact-loop
+      (term (func () (-> (i32) (i32)) local (i32)
+                  (seq (const i32 1)
+                       (set-local 1)
+                       (loop (-> () ())
+                             (seq (get-local 0)
+                                  (eqz i32)
+                                  (if (-> () ())
+                                      (seq (get-local 1) return)
+                                      else
+                                      (seq (get-local 0)
+                                           (get-local 1)
+                                           (mul i32)
+                                           (set-local 1)
+                                           (get-local 0)
+                                           (const i32 1)
+                                           (sub i32)
+                                           (set-local 0)
+                                           (br 1)))))))))
+    (define f-2
+      (term (func () (-> (i32) (i32)) local ()
+                  (seq (const i32 5) (call 1)
+                       (get-local 0) (mul i32)))))
+    (define cl-0
+      (term {(inst 0) (code ,f-0)}))
+    (define cl-1
+      (term {(inst 0) (code ,fact-loop)}))
+    (define cl-2
+      (term {(inst 0) (code ,f-2)}))
+    (define modinst-0
+      (term {(func ,cl-0 ,cl-1 ,cl-2) (global)}))
+    (define modinst-1
+      (term {(func) (global)}))
+    (define tabinst-0
+      (term ()))
+    (define tabinst-1
+      (term ()))
+    (define func-store
+      (term {(,modinst-0 ,modinst-1)
+             (,tabinst-0 ,tabinst-1)
+             ()}))
+    (define-syntax-rule (func-config e*)
+      (term (,func-store () e* 0)))
 
-  ;; call factorial of 5
-  (test-wasm-->> (func-config (seq (const i32 5) (call 1)))
-                 (func-config (seq (const i32 120))))
-  (test-wasm-->> (func-config (seq (const i32 2) (call 2)))
-                 (func-config (seq (const i32 240))))
+    (test-wasm-->> (func-config (seq (call 0)))
+                   (func-config (seq (const i32 0))))
+    (test-wasm-->> (func-config (seq (call 0)))
+                   (func-config (seq (const i32 0)))))
+
+  ;; test that globals don't interfere between instances
+  (let ()
+    (define f-0
+      (term (func () (-> () (i32)) local ()
+                  (seq (get-global 0)
+                       (const i32 1)
+                       (add i32)
+                       (set-global 0)
+                       (get-global 0)
+                       return))))
+    (define cl-0
+      (term {(inst 0) (code ,f-0)}))
+    (define cl-1
+      (term {(inst 1) (code ,f-0)}))
+    (define modinst-0
+      (term {(func ,cl-0 ,cl-1) (global (const i32 42))}))
+    (define modinst-1
+      (term {(func ,cl-1) (global (const i32 52))}))
+    (define tabinst-0  (term ()))
+    (define tabinst-1  (term ()))
+    (define func-store
+      (term {(,modinst-0 ,modinst-1)
+             (,tabinst-0 ,tabinst-1)
+             ()}))
+    (define-syntax-rule (func-config e*)
+      (term (,func-store () e* 0)))
+
+    (test-wasm-eval (func-config (seq (call 0) drop (call 0)))
+                    (term (const i32 44)))
+    (test-wasm-eval (func-config (seq (call 0) (call 0)
+                                      drop drop
+                                      (call 1)))
+                    (term (const i32 53))))
   )
