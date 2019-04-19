@@ -704,8 +704,10 @@
 
     (test-wasm-->> (func-config (seq (call 0)))
                    (func-config (seq (const i32 0))))
-    (test-wasm-->> (func-config (seq (call 0)))
-                   (func-config (seq (const i32 0)))))
+    (test-wasm-->> (func-config (seq (const i32 5) (call 1)))
+                   (func-config (seq (const i32 120))))
+    (test-wasm-->> (func-config (seq (const i32 2) (call 2)))
+                   (func-config (seq (const i32 240)))))
 
   ;; test that globals don't interfere between instances
   (let ()
