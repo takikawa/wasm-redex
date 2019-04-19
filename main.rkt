@@ -8,6 +8,13 @@
          pict
          pict/snip)
 
+;; wasm defines memory for module instances in 64Ki increments, but this is
+;; unwieldly in redex so we define the increment in bytes here
+(define *memory-increment* 20)
+
+;; some non-terminals (like for modules) differ from the paper due to redex
+;; constraints on non-terminals appearing as keywords, and some forms have
+;; extra keywords for ease of identification
 (define-language wasm-lang
   ;; types
   (t   ::= t-i t-f)
@@ -56,7 +63,7 @@
             (const t c))
 
   ;; primitive operations
-  [unop     :: unop-i unop-f]
+  [unop     ::= unop-i unop-f]
   (unop-i   ::= clz ctz popcnt)
   (unop-f   ::= neg abs ceil floor trunc nearest sqrt)
   [binop    ::= binop-i binop-f]
@@ -78,23 +85,26 @@
   (c    ::= number)
 
   ;; constant numerals
-  ((i j l k n) integer)
+  ((i j l k m n) integer)
 
-  ;; functions
-  (f    ::= (func (ex ...) tf local (t ...) e*)
-            (func (ex ...) tf im))
-  (glob ::= (global (ex ...) tg e ...)
-            (global (ex ...) tg im))
-  (tab  ::= (table (ex ...) n i ...)
-            (table (ex ...) n im))
-  (mem  ::= (memory (ex ...) n)
-            (memory (ex ...) n im))
-  (im   ::= (import string string))
-  (ex   ::= (export string))
-  (m    ::= (module f ... glob ...)
-            (module f ... glob ... tab)
-            (module f ... glob ... mem)
-            (module f ... glob ... tab mem)))
+  ;; bytes
+  (b    ::= integer)
+
+  ;; modules & functions
+  (f      ::= (func (ex ...) tf local (t ...) e*)
+              (func (ex ...) tf im))
+  (m-glob ::= (global (ex ...) tg e ...)
+              (global (ex ...) tg im))
+  (m-tab  ::= (table (ex ...) n i ...)
+              (table (ex ...) n im))
+  (m-mem  ::= (memory (ex ...) n)
+              (memory (ex ...) n im))
+  (im     ::= (import string string))
+  (ex     ::= (export string))
+  (mod    ::= (module f ... m-glob ...)
+              (module f ... m-glob ... m-tab)
+              (module f ... m-glob ... m-mem)
+              (module f ... m-glob ... m-tab m-mem)))
 
 (define-extended-language wasm-runtime-lang wasm-lang
   ;; administrative expressions
@@ -105,11 +115,11 @@
                (local n {i (v ...)} e*))
 
   ;; runtime
-  (s       ::= {(modinst ...) (tabinst ...) (meminst ...)})
-  (modinst ::= {(func cl ...) (global v ...)}
-               {(func cl ...) (global v ...) (tab i)}
-               {(func cl ...) (global v ...) (mem i)}
-               {(func cl ...) (global v ...) (tab i) (mem i)})
+  (s       ::= {(inst modinst ...) (tab tabinst ...) (mem meminst ...)})
+  (modinst ::= {(func cl ...) (glob v ...)}
+               {(func cl ...) (glob v ...) (tab i)}
+               {(func cl ...) (glob v ...) (mem i)}
+               {(func cl ...) (glob v ...) (tab i) (mem i)})
   (tabinst ::= (cl ...))
   (meminst ::= (b ...))
   (cl      ::= {(inst i) (code f)})
@@ -223,7 +233,7 @@
 ;; extract a closure out of the func part of store
 (define-metafunction wasm-runtime-lang
   store-func : s i j -> cl
-  [(store-func {(modinst_0 ... modinst modinst_1 ...) any_0 ...} i j)
+  [(store-func {(inst modinst_0 ... modinst modinst_1 ...) any_0 ...} i j)
    cl
    (side-condition (= (length (term (modinst_0 ...))) (term i)))
    (where {(func cl_0 ... cl cl_1 ...) any_1 ...} modinst)
@@ -232,14 +242,14 @@
 (module+ test
   (let ()
     (define f1 (term (func () (-> () ()) local () (seq nop))))
-    (define modinst1 (term {(func {(inst 0) (code ,f1)}) (global)}))
-    (test-equal (term (store-func {(,modinst1) () ()} 0 0))
+    (define modinst1 (term {(func {(inst 0) (code ,f1)}) (glob)}))
+    (test-equal (term (store-func {(inst ,modinst1) (tab) (mem)} 0 0))
                 (term {(inst 0) (code ,f1)}))))
 
 ;; extract a closure from the tab part of store
 (define-metafunction wasm-runtime-lang
   store-tab : s i j -> cl
-  [(store-tab {any (tabinst_0 ... tabinst tabinst_1 ...) any_0 ...} i j)
+  [(store-tab {any (tab tabinst_0 ... tabinst tabinst_1 ...) any_0 ...} i j)
    cl
    (side-condition (= (length (term (tabinst_0 ...))) (term i)))
    (where (cl_0 ... cl cl_1 ...) tabinst)
@@ -248,21 +258,21 @@
 ;; read a global value
 (define-metafunction wasm-runtime-lang
   store-glob : s i j -> v
-  [(store-glob {(modinst_0 ... modinst modinst_1 ...) any_0 ...} i j)
+  [(store-glob {(inst modinst_0 ... modinst modinst_1 ...) any_0 ...} i j)
    v
    (side-condition (= (length (term (modinst_0 ...))) (term i)))
-   (where {any_f (global v_0 ... v v_1 ...) any_1 ...} modinst)
+   (where {any_f (glob v_0 ... v v_1 ...) any_1 ...} modinst)
    (side-condition (= (length (term (v_0 ...))) (term j)))])
 
 ;; write a global value
 (define-metafunction wasm-runtime-lang
   store-glob= : s i j v -> s
-  [(store-glob= {(modinst_0 ... modinst modinst_1 ...) any_0 ...} i j v_new)
-   {(modinst_0 ... modinst_new modinst_1 ...) any_0 ...}
+  [(store-glob= {(inst modinst_0 ... modinst modinst_1 ...) any_0 ...} i j v_new)
+   {(inst modinst_0 ... modinst_new modinst_1 ...) any_0 ...}
    (side-condition (= (length (term (modinst_0 ...))) (term i)))
-   (where {any_f (global v_0 ... v v_1 ...) any_1 ...} modinst)
+   (where {any_f (glob v_0 ... v v_1 ...) any_1 ...} modinst)
    (side-condition (= (length (term (v_0 ...))) (term j)))
-   (where modinst_new {any_f (global v_0 ... v_new v_1 ...) any_1 ...})])
+   (where modinst_new {any_f (glob v_0 ... v_new v_1 ...) any_1 ...})])
 
 ;; extract the code from a closure
 (define-metafunction wasm-runtime-lang
@@ -594,12 +604,12 @@
         grow-memory)
 
    with
-   [(--> (s F (in-hole E a) i)
-         (s F (in-hole E b) i))
-    (==> a b)]
-   [(--> (s F a i)
-         (s F b i))
-    (++> a b)]))
+   [(--> (s F (in-hole E x) i)
+         (s F (in-hole E y) i))
+    (==> x y)]
+   [(--> (s F x i)
+         (s F y i))
+    (++> x y)]))
 
 (module+ test
   (require rackunit)
@@ -623,7 +633,9 @@
     (test-equal (wasm-eval x) y))
 
   ;; test helpers and terms
-  (define mt-s (term {() () ()}))
+  (define default-memory
+    (make-list *memory-increment* 0))
+  (define mt-s (term {(inst) (tab) (mem)}))
   (define-syntax-rule (simple-config e*)
     (term (,mt-s () e* 0)))
 
@@ -756,17 +768,17 @@
     (define cl-2
       (term {(inst 0) (code ,f-2)}))
     (define modinst-0
-      (term {(func ,cl-0 ,cl-1 ,cl-2) (global)}))
+      (term {(func ,cl-0 ,cl-1 ,cl-2) (glob)}))
     (define modinst-1
-      (term {(func) (global)}))
+      (term {(func) (glob)}))
     (define tabinst-0
       (term ()))
     (define tabinst-1
       (term ()))
     (define func-store
-      (term {(,modinst-0 ,modinst-1)
-             (,tabinst-0 ,tabinst-1)
-             ()}))
+      (term {(inst ,modinst-0 ,modinst-1)
+             (tab ,tabinst-0 ,tabinst-1)
+             (mem)}))
     (define-syntax-rule (func-config e*)
       (term (,func-store () e* 0)))
 
@@ -792,15 +804,15 @@
     (define cl-1
       (term {(inst 1) (code ,f-0)}))
     (define modinst-0
-      (term {(func ,cl-0 ,cl-1) (global (const i32 42))}))
+      (term {(func ,cl-0 ,cl-1) (glob (const i32 42))}))
     (define modinst-1
-      (term {(func ,cl-1) (global (const i32 52))}))
+      (term {(func ,cl-1) (glob (const i32 52))}))
     (define tabinst-0  (term ()))
     (define tabinst-1  (term ()))
     (define func-store
-      (term {(,modinst-0 ,modinst-1)
-             (,tabinst-0 ,tabinst-1)
-             ()}))
+      (term {(inst ,modinst-0 ,modinst-1)
+             (tab ,tabinst-0 ,tabinst-1)
+             (mem)}))
     (define-syntax-rule (func-config e*)
       (term (,func-store () e* 0)))
 
