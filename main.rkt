@@ -85,7 +85,7 @@
   (c    ::= number)
 
   ;; constant numerals
-  ((i j l k m n) integer)
+  ((i j l k m n a o) integer)
 
   ;; bytes
   (b    ::= integer)
@@ -274,6 +274,64 @@
    (side-condition (= (length (term (v_0 ...))) (term j)))
    (where modinst_new {any_f (glob v_0 ... v_new v_1 ...) any_1 ...})])
 
+;; read from memory
+(define-metafunction wasm-runtime-lang
+  store-mem : s i j n -> (b ...)
+  [(store-mem {(inst modinst_0 ... modinst modinst_1 ...)
+               any_1
+               (mem meminst_0 ... meminst meminst_1 ...)}
+              i j n)
+   (b ...)
+   (side-condition (= (length (term (modinst_0 ...))) (term i)))
+   (where {any_i ... (mem i_mem)} modinst)
+   (side-condition (= (length (term (meminst_0 ...))) (term i_mem)))
+   (where (b_0 ... b_rest ...) meminst)
+   (side-condition (= (length (term (b_0 ...))) (term j)))
+   (where (b ... b_end ...) (b_rest ...))
+   (side-condition (= (length (term (b ...))) (term n)))])
+
+(define-metafunction wasm-runtime-lang
+  sizeof : t -> n
+  ;; TODO: tp sizes
+  [(sizeof i32) 4]
+  [(sizeof i64) 8]
+  [(sizeof f32) 4]
+  [(sizeof f64) 8])
+
+(define-metafunction wasm-runtime-lang
+  reinterpret : t (b ...) -> c
+  [(reinterpret t-i (b ...))
+   ,(integer-bytes->integer (list->bytes (term (b ...))) #t)]
+  [(reinterpret t-f (b ...))
+   ,(floating-point-bytes->real (list->bytes (term (b ...))))])
+
+(define-metafunction wasm-runtime-lang
+  bits : n t c -> (b ...)
+  [(bits n i32 i)
+   ,(bytes->list (integer->integer-bytes (term i) 4 #t))]
+  [(bits n i64 i)
+   ,(bytes->list (integer->integer-bytes (term i) 8 #t))]
+  [(bits n f32 float)
+   ,(bytes->list (real->floating-point-bytes (term float) 4))]
+  [(bits n f64 float)
+   ,(bytes->list (real->floating-point-bytes (term float) 8))])
+
+(define-metafunction wasm-runtime-lang
+  store-mem= : s i j n (b ...) -> s
+  [(store-mem= {(name any_0 (inst modinst_0 ... modinst modinst_1 ...))
+                any_1
+                (mem meminst_0 ... meminst meminst_1 ...)}
+               i j n (b_new ...))
+   {any_0 any_1 (mem meminst_0 ... meminst_new meminst_1 ...)}
+   (side-condition (= (length (term (modinst_0 ...))) (term i)))
+   (where {any_i ... (mem i_mem)} modinst)
+   (side-condition (= (length (term (meminst_0 ...))) (term i_mem)))
+   (where (b_0 ... b_rest ...) meminst)
+   (side-condition (= (length (term (b_0 ...))) (term j)))
+   (where (b ... b_end ...) (b_rest ...))
+   (side-condition (= (length (term (b ...))) (term n)))
+   (where meminst_new (b_0 ... b_new ... b_end ...))])
+
 ;; extract the code from a closure
 (define-metafunction wasm-runtime-lang
   cl-code : cl -> f
@@ -299,7 +357,8 @@
 (define-metafunction wasm-runtime-lang
   v*->F-helper : v* F -> F
   [(v*->F-helper ϵ F) F]
-  [(v*->F-helper (v v*) (v_acc ...)) (v_acc ... v)])
+  [(v*->F-helper (v v*) (v_acc ...))
+   (v*->F-helper v* (v_acc ... v))])
 
 ;; implement primitives
 (define-metafunction wasm-runtime-lang
@@ -524,10 +583,10 @@
         call-indirect-trap)
 
    (++> (in-hole E ((call cl) e*_0))
-        (in-hole E_outer ((local l {(cl-inst cl) F} e*_block) e*_0))
+        (in-hole E_outer ((local m {(cl-inst cl) F} e*_block) e*_0))
         (where (func () (-> (t_1 ...) (t_2 ...)) local (t ...) e*_code) (cl-code cl))
         (where n ,(length (term (t_1 ...))))
-        (where l ,(length (term (t_2 ...))))
+        (where m ,(length (term (t_2 ...))))
         (where (E_outer E_v) (v-split E n))
         (where F (F-append (v*->F (in-hole E_v ϵ)) ((const t 0) ...)))
         (where e*_block (seq (block (-> () (t_2 ...)) e*_code)))
@@ -585,11 +644,16 @@
 
    ;; reductions for operating on memory
    (--> (s F (in-hole E ((const i32 k) ((load t a o) e*))) i)
-        ;; TODO: define reinterpret
-        (s F (in-hole E ((const t (reinterpret t b)) e*)) i)
-        (where b (s-mem i ,(+ (term k) (term o))))
+        (s F (in-hole E ((const t (reinterpret t (b ...))) e*)) i)
+        (where (b ...) (store-mem s i ,(+ (term k) (term o)) (sizeof t)))
         load)
-   ;; TODO: load tp-sx case, store
+
+   (--> (s F (in-hole E ((const i32 k) ((const t c) ((store t a o) e*)))) i)
+        (s_new F (in-hole E e*) i)
+        (where n (sizeof t))
+        (where s_new (store-mem= s i ,(+ (term k) (term o)) n (bits n t c)))
+        store)
+   ;; TODO: load tp-sx case
 
    (--> (s F (in-hole E (current-memory e*)) i)
         ;; TODO: define memory-size
@@ -822,4 +886,59 @@
                                       drop drop
                                       (call 1)))
                     (term (const i32 53))))
+
+  ;; tests for memory related operations
+  (let ()
+    ;; f-0 just stores some data
+    (define f-0
+      (term (func () (-> (i32 i64) ()) local ()
+                  (seq (get-local 0)
+                       (get-local 1)
+                       (store i64 6 0)
+                       return))))
+    ;; f-1 modifies the data
+    (define f-1
+      (term (func () (-> (i32 i64) ()) local (i64)
+                  (seq (get-local 0)
+                       (load i64 6 0)
+                       (tee-local 2)
+                       (get-local 1)
+                       (mul i64)
+                       (set-local 2)
+                       (get-local 0)
+                       (get-local 2)
+                       (store i64 6 0)
+                       return))))
+    ;; f-2 just reads it
+    (define f-2
+      (term (func () (-> (i32) (i64)) local ()
+                  (seq (get-local 0)
+                       (load i64 6 0)
+                       return))))
+    (define cl-0
+      (term {(inst 0) (code ,f-0)}))
+    (define cl-1
+      (term {(inst 1) (code ,f-1)}))
+    (define cl-2
+      (term {(inst 0) (code ,f-2)}))
+    (define modinst-0
+      (term {(func ,cl-0 ,cl-1 ,cl-2) (glob) (mem 0)}))
+    (define modinst-1
+      (term {(func ,cl-1) (glob) (mem 0)}))
+    (define mem-store
+      (term {(inst ,modinst-0 ,modinst-1)
+             (tab () ())
+             (mem ,default-memory)}))
+    (define-syntax-rule (mem-config e*)
+      (term (,mem-store () e* 0)))
+
+    (test-wasm-eval (mem-config (seq (const i32 0)
+                                     (const i64 42)
+                                     (call 0)
+                                     (const i32 0)
+                                     (const i64 5)
+                                     (call 1)
+                                     (const i32 0)
+                                     (call 2)))
+                    (term (const i64 210))))
   )
