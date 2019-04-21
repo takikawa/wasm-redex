@@ -10,7 +10,7 @@
 
 ;; wasm defines memory for module instances in 64Ki increments, but this is
 ;; unwieldly in redex so we define the increment in bytes here
-(define *memory-increment* 20)
+(define *page-size* 20)
 
 ;; some non-terminals (like for modules) differ from the paper due to redex
 ;; constraints on non-terminals appearing as keywords, and some forms have
@@ -21,6 +21,7 @@
   (t-f ::= f32 f64)
   (t-i ::= i32 i64)
   (tp  ::= i8 i16 i32)
+  (sx  ::= sx-s sx-u) ; renamed to avoid conflict with s non-terminal
   (tf  ::= (-> (t ...) (t ...)))
   (tg  ::= t (mut t))
 
@@ -44,7 +45,7 @@
               (get-global i)
               (set-global i)
               (load t a o)
-              (load t tp-sx a o)
+              (load t tp sx a o)
               (store t a o)
               (store t tp a o)
               current-memory
@@ -57,8 +58,8 @@
               (testop-i t-i)
               (relop-i t-i)
               (relop-f t-f)
-              (cvtop t)
-              (cvtop t t-sx))
+              (cvtop t t)
+              (cvtop t t sx))
   (e    ::= e-no-v
             (const t c))
 
@@ -291,30 +292,38 @@
    (side-condition (= (length (term (b ...))) (term n)))])
 
 (define-metafunction wasm-runtime-lang
-  sizeof : t -> n
-  ;; TODO: tp sizes
+  sizeof : any -> n
+  [(sizeof i8)  1]
+  [(sizeof i16) 2]
   [(sizeof i32) 4]
   [(sizeof i64) 8]
   [(sizeof f32) 4]
   [(sizeof f64) 8])
 
 (define-metafunction wasm-runtime-lang
-  reinterpret : t (b ...) -> c
-  [(reinterpret t-i (b ...))
+  const-reinterpret-packed : t (b ...) sx -> c
+  [(const-reinterpret-packed t (b ...) sx-s)
    ,(integer-bytes->integer (list->bytes (term (b ...))) #t)]
-  [(reinterpret t-f (b ...))
+  [(const-reinterpret-packed t (b ...) sx-u)
+   ,(integer-bytes->integer (list->bytes (term (b ...))) #f)])
+
+(define-metafunction wasm-runtime-lang
+  const-reinterpret : t (b ...) -> c
+  [(const-reinterpret t-i (b ...))
+   ,(integer-bytes->integer (list->bytes (term (b ...))) #t)]
+  [(const-reinterpret t-f (b ...))
    ,(floating-point-bytes->real (list->bytes (term (b ...))))])
 
 (define-metafunction wasm-runtime-lang
   bits : n t c -> (b ...)
   [(bits n i32 i)
-   ,(bytes->list (integer->integer-bytes (term i) 4 #t))]
+   ,(take (bytes->list (integer->integer-bytes (term i) 4 #t)) (term n))]
   [(bits n i64 i)
-   ,(bytes->list (integer->integer-bytes (term i) 8 #t))]
+   ,(take (bytes->list (integer->integer-bytes (term i) 8 #t)) (term n))]
   [(bits n f32 float)
-   ,(bytes->list (real->floating-point-bytes (term float) 4))]
+   ,(take (bytes->list (real->floating-point-bytes (term float) 4)) (term n))]
   [(bits n f64 float)
-   ,(bytes->list (real->floating-point-bytes (term float) 8))])
+   ,(take (bytes->list (real->floating-point-bytes (term float) 8)) (term n))])
 
 (define-metafunction wasm-runtime-lang
   store-mem= : s i j n (b ...) -> s
@@ -331,6 +340,34 @@
    (where (b ... b_end ...) (b_rest ...))
    (side-condition (= (length (term (b ...))) (term n)))
    (where meminst_new (b_0 ... b_new ... b_end ...))])
+
+;; metafunctions for manipulating memory size
+(define-metafunction wasm-runtime-lang
+  memory-size : s i -> n
+  [(memory-size {(name any_0 (inst modinst_0 ... modinst modinst_1 ...))
+                 any_1
+                 (mem meminst_0 ... meminst meminst_1 ...)}
+                i)
+   n_size
+   (side-condition (= (length (term (modinst_0 ...))) (term i)))
+   (where {any_i ... (mem i_mem)} modinst)
+   (side-condition (= (length (term (meminst_0 ...))) (term i_mem)))
+   (where n_size ,(/ (length (term meminst)) *page-size*))])
+
+(define-metafunction wasm-runtime-lang
+  expand-memory : s i k -> (s n)
+  [(expand-memory {(name any_0 (inst modinst_0 ... modinst modinst_1 ...))
+                   any_1
+                   (mem meminst_0 ... meminst meminst_1 ...)}
+                  i k)
+   (s_new n_size)
+   (side-condition (= (length (term (modinst_0 ...))) (term i)))
+   (where {any_i ... (mem i_mem)} modinst)
+   (side-condition (= (length (term (meminst_0 ...))) (term i_mem)))
+   (where meminst_new ,(append (term meminst)
+                               (flatten (make-list (term k) (make-list *page-size* 0)))))
+   (where n_size ,(/ (length (term meminst_new)) *page-size*))
+   (where s_new {any_0 any_1 (mem meminst_0 ... meminst_new meminst_1 ...)})])
 
 ;; extract the code from a closure
 (define-metafunction wasm-runtime-lang
@@ -493,7 +530,11 @@
         ((const i32 (do-relop relop t c_1 c_2)) e*)
         relop)
 
-   ;; TODO: convert / reinterpret
+   ;; TODO: convert
+
+   (==> ((const t_1 c) ((reinterpret t_2 t_1) e*))
+        ((const t_2 (const-reinterpret t_2 (bits (sizeof t_1) t_1 c))) e*)
+        reinterpret)
 
    ;; generally these rules need to mention the "continuation" in the sequence
    ;; of instructions because Redex does not allow splicing holes with a
@@ -573,11 +614,13 @@
 
    (--> (s F (in-hole E ((const i32 j) ((call-indirect tf) e*))) i)
         (s F (in-hole E ((call cl) e*)) i)
+        ;; TODO: implement store-tab
         (where cl (store-tab s i j))
         (where (func tf local (t ...) e*) (cl-code cl))
         call-indirect)
 
    ;; implicit side-condition: pattern match from previous case failed
+   #;
    (--> (s F (in-hole E ((const i32 j) ((call-indirect tf) e*))) i)
         (s F (in-hole E (trap e*)) i)
         call-indirect-trap)
@@ -644,28 +687,48 @@
 
    ;; reductions for operating on memory
    (--> (s F (in-hole E ((const i32 k) ((load t a o) e*))) i)
-        (s F (in-hole E ((const t (reinterpret t (b ...))) e*)) i)
+        (s F (in-hole E ((const t (const-reinterpret t (b ...))) e*)) i)
         (where (b ...) (store-mem s i ,(+ (term k) (term o)) (sizeof t)))
         load)
+
+   (--> (s F (in-hole E ((const i32 k) ((load t tp sx a o) e*))) i)
+        (s F (in-hole E ((const t (const-reinterpret-packed t (b ...) sx)) e*)) i)
+        (where (b ...) (store-mem s i ,(+ (term k) (term o)) (sizeof tp)))
+        load-packed)
+
+   #;
+   (--> (s F (in-hole E ((const i32 k) ((load t tp ... sx ... a o) e*))) i)
+        (s F (in-hole E (trap e*)) i)
+        load-trap)
 
    (--> (s F (in-hole E ((const i32 k) ((const t c) ((store t a o) e*)))) i)
         (s_new F (in-hole E e*) i)
         (where n (sizeof t))
         (where s_new (store-mem= s i ,(+ (term k) (term o)) n (bits n t c)))
         store)
-   ;; TODO: load tp-sx case
+
+   (--> (s F (in-hole E ((const i32 k) ((const t c) ((store t tp a o) e*)))) i)
+        (s_new F (in-hole E e*) i)
+        (where n (sizeof tp))
+        (where s_new (store-mem= s i ,(+ (term k) (term o)) n (bits n t c)))
+        store-packed)
+
+   #;
+   (--> (s F (in-hole E ((const i32 k) ((const t c) ((store t tp ... a o) e*)))) i)
+        (s F (in-hole E (trap e*)) i)
+        store-trap)
 
    (--> (s F (in-hole E (current-memory e*)) i)
-        ;; TODO: define memory-size
         (s F (in-hole E ((const i32 (memory-size s i)) e*)) i)
         current-memory)
 
-   ;; TODO: fail case
    (--> (s F (in-hole E ((const i32 k) (grow-memory e*))) i)
         (s_new F (in-hole E ((const i32 j_newsize) e*)) i)
-        ;; TODO: define expand-memory
         (where (s_new j_newsize) (expand-memory s i k))
         grow-memory)
+
+   ;; failure case for grow-memory omitted, alternatively we could institute a cap
+   ;; and return -1 for that cap in the model
 
    with
    [(--> (s F (in-hole E x) i)
@@ -698,7 +761,7 @@
 
   ;; test helpers and terms
   (define default-memory
-    (make-list *memory-increment* 0))
+    (make-list *page-size* 0))
   (define mt-s (term {(inst) (tab) (mem)}))
   (define-syntax-rule (simple-config e*)
     (term (,mt-s () e* 0)))
