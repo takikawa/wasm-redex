@@ -250,9 +250,14 @@
 ;; extract a closure from the tab part of store
 (define-metafunction wasm-runtime-lang
   store-tab : s i j -> cl
-  [(store-tab {any (tab tabinst_0 ... tabinst tabinst_1 ...) any_0 ...} i j)
+  [(store-tab {(inst modinst_0 ... modinst modinst_1 ...)
+               (tab tabinst_0 ... tabinst tabinst_1 ...)
+               any_0 ...}
+              i j)
    cl
-   (side-condition (= (length (term (tabinst_0 ...))) (term i)))
+   (side-condition (= (length (term (modinst_0 ...))) (term i)))
+   (where {any_1 ... (tab i_tab) any_2 ...} modinst)
+   (side-condition (= (length (term (tabinst_0 ...))) (term i_tab)))
    (where (cl_0 ... cl cl_1 ...) tabinst)
    (side-condition (= (length (term (cl_0 ...))) (term j)))])
 
@@ -614,7 +619,6 @@
 
    (--> (s F (in-hole E ((const i32 j) ((call-indirect tf) e*))) i)
         (s F (in-hole E ((call cl) e*)) i)
-        ;; TODO: implement store-tab
         (where cl (store-tab s i j))
         (where (func tf local (t ...) e*) (cl-code cl))
         call-indirect)
