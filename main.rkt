@@ -6,7 +6,8 @@
 
 (require redex
          pict
-         pict/snip)
+         pict/snip
+         racket/fixnum)
 
 ;; wasm defines memory for module instances in 64Ki increments, but this is
 ;; unwieldly in redex so we define the increment in bytes here
@@ -377,6 +378,24 @@
    (where n_size ,(/ (length (term meminst_new)) *page-size*))
    (where s_new {any_0 any_1 (mem meminst_0 ... meminst_new meminst_1 ...)})])
 
+;; conversion between types
+;; precondition: validation passed
+;; FIXME: this is probably not quite right
+(define-metafunction wasm-runtime-lang
+  cvt : t t c -> c
+  [(cvt t-i_1 t-i_2 c)
+   ,(integer-bytes->integer
+     (integer->integer-bytes (term c) (term (sizeof t-i)) #t)
+     #t)]
+  [(cvt t i32 c)   ,(real->single-flonum (term c))]
+  [(cvt t i64 c)   ,(real->double-flonum (term c))]
+  [(cvt f32 t-i c) ,(fl->fx (real->single-flonum (term c)))]
+  [(cvt f64 t-i c) ,(fl->fx (real->double-flonum (term c)))])
+
+;; TODO: implement properly
+(define-metafunction wasm-runtime-lang
+  cvt-sx : t t c -> c)
+
 ;; extract the code from a closure
 (define-metafunction wasm-runtime-lang
   cl-code : cl -> f
@@ -538,7 +557,13 @@
         ((const i32 (do-relop relop t c_1 c_2)) e*)
         relop)
 
-   ;; TODO: convert
+   (==> ((const t_1 c) ((convert t_2 t_1) e*))
+        ((const t_2 (cvt t_1 t_2 c)))
+        convert)
+
+   (==> ((const t_1 c) ((convert t_2 t_1 sx) e*))
+        ((const t_2 (cvt-sx t_1 t_2 sx c)))
+        convert-sx)
 
    (==> ((const t_1 c) ((reinterpret t_2 t_1) e*))
         ((const t_2 (const-reinterpret t_2 (bits (sizeof t_1) t_1 c))) e*)
