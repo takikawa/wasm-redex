@@ -623,13 +623,15 @@
    (--> (s F (in-hole E ((const i32 j) ((call-indirect tf) e*))) i)
         (s F (in-hole E ((call cl) e*)) i)
         (where cl (store-tab s i j))
-        (where (func tf local (t ...) e*) (cl-code cl))
+        (where (func () tf local (t ...) e*_f) (cl-code cl))
         call-indirect)
 
-   ;; implicit side-condition: pattern match from previous case failed
-   #;
-   (--> (s F (in-hole E ((const i32 j) ((call-indirect tf) e*))) i)
+   ;; case where dynamic type check fails
+   (--> (s F (in-hole E ((const i32 j) ((call-indirect tf_0) e*))) i)
         (s F (in-hole E (trap e*)) i)
+        (where cl (store-tab s i j))
+        (where (func () tf_1 local (t ...) e*_f) (cl-code cl))
+        (side-condition (not (equal? (term tf_0) (term tf_1))))
         call-indirect-trap)
 
    (++> (in-hole E ((call cl) e*_0))
@@ -971,6 +973,50 @@
                                       drop drop
                                       (call 1)))
                     (term (const i32 53))))
+
+  ;; tests for tables
+  (let ()
+    (define f-0
+      (term (func () (-> (f64 f64) (f64)) local ()
+                  (seq (get-local 0)
+                       (get-local 1)
+                       (sub f64)
+                       return))))
+    (define f-1
+      (term (func () (-> (f64 f64) (f64)) local ()
+                  (seq (get-local 0)
+                       (get-local 1)
+                       (add f64)
+                       return))))
+    (define cl-0
+      (term {(inst 0) (code ,f-0)}))
+    (define cl-1
+      (term {(inst 0) (code ,f-1)}))
+    (define modinst-0
+      (term {(func) (glob) (tab 0)}))
+    (define modinst-1
+      (term {(func) (glob) (tab 0)}))
+    (define tabinst (term (,cl-0 ,cl-1)))
+    (define tab-store
+      (term {(inst ,modinst-0 ,modinst-1)
+             (tab ,tabinst)
+             (mem)}))
+    (define-syntax-rule (tab-config e*)
+      (term (,tab-store () e* 0)))
+
+    (test-wasm-->> (tab-config (seq (const f64 3.0)
+                                    (const f64 5.0)
+                                    (const i32 1) ; call index
+                                    (call-indirect (-> (f64 f64) (f64)))))
+                   (tab-config (seq (const f64 8.0))))
+    (test-wasm-->> (tab-config (seq (const f64 15.0)
+                                    (const f64 5.0)
+                                    (const i32 0)
+                                    (const i32 1)
+                                    (const i32 5)
+                                    select
+                                    (call-indirect (-> (f64 f64) (f64)))))
+                   (tab-config (seq (const f64 10.0)))))
 
   ;; tests for memory related operations
   (let ()
