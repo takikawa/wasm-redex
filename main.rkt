@@ -282,7 +282,7 @@
 
 ;; read from memory
 (define-metafunction wasm-runtime-lang
-  store-mem : s i j n -> (b ...)
+  store-mem : s i j n -> (b ...) or #false
   [(store-mem {(inst modinst_0 ... modinst modinst_1 ...)
                any_1
                (mem meminst_0 ... meminst meminst_1 ...)}
@@ -294,7 +294,9 @@
    (where (b_0 ... b_rest ...) meminst)
    (side-condition (= (length (term (b_0 ...))) (term j)))
    (where (b ... b_end ...) (b_rest ...))
-   (side-condition (= (length (term (b ...))) (term n)))])
+   (side-condition (= (length (term (b ...))) (term n)))]
+  [(store-mem any ...)
+   #false])
 
 (define-metafunction wasm-runtime-lang
   sizeof : any -> n
@@ -331,7 +333,7 @@
    ,(take (bytes->list (real->floating-point-bytes (term float) 8)) (term n))])
 
 (define-metafunction wasm-runtime-lang
-  store-mem= : s i j n (b ...) -> s
+  store-mem= : s i j n (b ...) -> s or #false
   [(store-mem= {(name any_0 (inst modinst_0 ... modinst modinst_1 ...))
                 any_1
                 (mem meminst_0 ... meminst meminst_1 ...)}
@@ -344,7 +346,8 @@
    (side-condition (= (length (term (b_0 ...))) (term j)))
    (where (b ... b_end ...) (b_rest ...))
    (side-condition (= (length (term (b ...))) (term n)))
-   (where meminst_new (b_0 ... b_new ... b_end ...))])
+   (where meminst_new (b_0 ... b_new ... b_end ...))]
+  [(store-mem= any ...) #false])
 
 ;; metafunctions for manipulating memory size
 (define-metafunction wasm-runtime-lang
@@ -700,10 +703,15 @@
         (where (b ...) (store-mem s i ,(+ (term k) (term o)) (sizeof tp)))
         load-packed)
 
-   #;
-   (--> (s F (in-hole E ((const i32 k) ((load t tp ... sx ... a o) e*))) i)
+   (--> (s F (in-hole E ((const i32 k) ((load t a o) e*))) i)
         (s F (in-hole E (trap e*)) i)
+        (where #false (store-mem s i ,(+ (term k) (term o)) (sizeof t)))
         load-trap)
+
+   (--> (s F (in-hole E ((const i32 k) ((load t tp sx a o) e*))) i)
+        (s F (in-hole E (trap e*)) i)
+        (where #false (store-mem s i ,(+ (term k) (term o)) (sizeof tp)))
+        load-trap-packed)
 
    (--> (s F (in-hole E ((const i32 k) ((const t c) ((store t a o) e*)))) i)
         (s_new F (in-hole E e*) i)
@@ -717,10 +725,17 @@
         (where s_new (store-mem= s i ,(+ (term k) (term o)) n (bits n t c)))
         store-packed)
 
-   #;
    (--> (s F (in-hole E ((const i32 k) ((const t c) ((store t tp ... a o) e*)))) i)
         (s F (in-hole E (trap e*)) i)
+        (where n (sizeof t))
+        (where #false (store-mem= s i ,(+ (term k) (term o)) n (bits n t c)))
         store-trap)
+
+   (--> (s F (in-hole E ((const i32 k) ((const t c) ((store t tp a o) e*)))) i)
+        (s F (in-hole E (trap e*)) i)
+        (where n (sizeof tp))
+        (where #false (store-mem= s i ,(+ (term k) (term o)) n (bits n t c)))
+        store-trap-packed)
 
    (--> (s F (in-hole E (current-memory e*)) i)
         (s F (in-hole E ((const i32 (memory-size s i)) e*)) i)
@@ -750,9 +765,12 @@
     (unless (= (length results) 1)
       (error "wasm-> had non-deterministic evaluation or no result"))
     (define result (first results))
-    (redex-let wasm-runtime-lang
-               ([{s F (v ϵ) i} (first results)])
-               (term v)))
+    (define result->eval-result
+      (term-match/single
+       wasm-runtime-lang
+       [{s F (v ϵ) i} (term v)]
+       [{s F (trap ϵ) i} (term trap)]))
+    (result->eval-result (first results)))
 
   (define-syntax-rule (test-wasm--> x y)
     (test--> wasm-> x y))
@@ -1012,5 +1030,20 @@
                     (term (const i32 1)))
     (test-wasm-eval (mem-config (seq (const i32 2) grow-memory))
                     (term (const i32 3)))
+    ;; write/read at very end of page
+    (test-wasm-eval (mem-config (seq (const i32 ,(- *page-size* 8))
+                                     (const i64 42)
+                                     (call 0)
+                                     (const i32 ,(- *page-size* 8))
+                                     (call 2)))
+                    (term (const i64 42)))
+    ;; reads & writes out of bounds should fail
+    (test-wasm-eval (mem-config (seq (const i32 ,(- *page-size* 7))
+                                     (const i64 42)
+                                     (call 0)))
+                    (term trap))
+    (test-wasm-eval (mem-config (seq (const i32 ,(- *page-size* 7))
+                                     (call 2)))
+                    (term trap))
     )
   )
