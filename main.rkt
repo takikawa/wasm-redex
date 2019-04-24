@@ -7,6 +7,7 @@
 (require redex
          pict
          pict/snip
+         racket/draw
          racket/fixnum)
 
 ;; wasm defines memory for module instances in 64Ki increments, but this is
@@ -424,6 +425,12 @@
   [(v*->F-helper (v v*) (v_acc ...))
    (v*->F-helper v* (v_acc ... v))])
 
+;; the opposite of v*->F, just used for visualization
+(define-metafunction wasm-runtime-lang
+  F->v* : F -> v*
+  [(F->v* ()) ϵ]
+  [(F->v* (v v_0 ...)) (v (F->v* (v_0 ...)))])
+
 ;; implement primitives
 (define-metafunction wasm-runtime-lang
   do-unop : unop t c -> c
@@ -459,19 +466,31 @@
   [(do-relop ne t c_1 c_2) ,(if (= (term c_1) (term c_2)) 0 1)])
 
 ;; helpers for pretty printing / drawing as stack picts
-(define (pp/pict state port width text)
+(define (pp/pict state port width txt)
   (redex-let
    wasm-runtime-lang
    ([{s F e* i} state])
-   (define p (term->pict (term e*)))
-   (send text insert (new pict-snip% [pict p]))))
+   (define e*-pict (term->pict (term e*)))
+   (define p
+     (vl-append (text (format "instance: ~a" (term i)))
+                (text "instructions:")
+                (blank 0 5)
+                e*-pict))
+   (send txt insert (new pict-snip% [pict p]))))
 
-(define (stack-pict str)
+(define (type->color type)
+  (match type
+    ['value   "lemonchiffon"]
+    ['instr   "pale green"]
+    ['control "sky blue"]
+    ['admin   "lavender"]))
+
+(define (stack-pict str [type 'instr])
   (cc-superimpose
-   (filled-rectangle 100 50
-                     #:color "white"
-                     #:border-color "black")
-   (text str)))
+   (filled-rectangle 130 35
+                     #:color (type->color type)
+                     #:border-color "gray")
+   (text str (list (make-object color% "black")))))
 
 (define (indent pict)
   (hc-append (blank 30 1) pict))
@@ -481,38 +500,45 @@
    wasm-runtime-lang
    [((const t c) e*)
     (let ()
-      (define str (format "(~a.const ~a)" (term t) (term c)))
-      (vc-append (stack-pict str)
+      (define str (format "~a.const ~a" (term t) (term c)))
+      (vc-append (stack-pict str 'value)
                  (term->pict (term e*))))]
    [((call cl) e*)
     (let ()
-      (vc-append (stack-pict "(call #<closure>)")
+      (vc-append (stack-pict "call #<closure>")
                  (term->pict (term e*))))]
    [((label n {e*_0} e*_1) e*_2)
     (let ()
-      (vc-append (stack-pict (~a "label " (term n)))
+      (vc-append (stack-pict (~a "label " (term n)) 'admin)
                  (indent (term->pict (term e*_1)))
                  (term->pict (term e*_2))))]
    [((local n {i F} e*_1) e*_2)
     (let ()
-      (vc-append (stack-pict (format "local ~a ~a" (term n) (term i)))
+      (vc-append (stack-pict (format "local ~a {~a ; ...}" (term n) (term i))
+                             'admin)
+                 (indent (hc-append (text "frame" null 12 (/ pi 2))
+                                    (term->pict (term (F->v* F)))))
                  (indent (term->pict (term e*_1)))
                  (term->pict (term e*_2))))]
    [((block tf e*_1) e*_2)
     (let ()
-      (vc-append (stack-pict (format "block ~a" (term tf)))
+      (vc-append (stack-pict (format "block ~a" (term tf))
+                             'control)
                  (indent (term->pict (term e*_1)))
                  (term->pict (term e*_2))))]
    [((loop tf e*_1) e*_2)
     (let ()
-      (vc-append (stack-pict (format "loop ~a" (term tf)))
+      (vc-append (stack-pict (format "loop ~a" (term tf))
+                             'control)
                  (indent (term->pict (term e*_1)))
                  (term->pict (term e*_2))))]
    [((if tf e*_0 else e*_1) e*_2)
     (let ()
-      (vc-append (stack-pict (format "if ~a" (term tf)))
+      (vc-append (stack-pict (format "if ~a" (term tf))
+                             'control)
                  (indent (term->pict (term e*_0)))
-                 (stack-pict (format "then"))
+                 (stack-pict (format "else")
+                             'control)
                  (indent (term->pict (term e*_1)))
                  (term->pict (term e*_2))))]
    [(e e*)
@@ -687,12 +713,14 @@
    (--> (s_0 F_0 (in-hole E ((local n {i F_1} e*_0) e*_2)) j)
         (s_1 F_0 (in-hole E ((local n {i F_2} e*_1) e*_2)) j)
         ;; apply --> recursively
-        (where any_rec ,(apply-reduction-relation wasm-> (term (s_0 F_1 e*_0 i))))
+        (where any_rec
+               ,(apply-reduction-relation/tag-with-names
+                 wasm-> (term (s_0 F_1 e*_0 i))))
         ;; only apply this rule if this reduction was valid
         (side-condition (not (null? (term any_rec))))
         ;; the relation should be deterministic, so just take the first
-        (where (s_1 F_2 e*_1 i) ,(first (term any_rec)))
-        frame-reduction)
+        (where (string_tag (s_1 F_2 e*_1 i)) ,(first (term any_rec)))
+        (computed-name (term string_tag)))
 
    ;; reductions for operating on locals in frames
    (--> (s (name F (v_1 ... v v_2 ...)) (in-hole E ((get-local j) e*)) i)
