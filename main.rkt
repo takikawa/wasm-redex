@@ -5,10 +5,12 @@
 ;;   Haas et al.
 
 (require redex
+         data/bit-vector
          pict
          pict/snip
          racket/draw
-         racket/fixnum)
+         racket/fixnum
+         rnrs/arithmetic/bitwise-6)
 
 ;; wasm defines memory for module instances in 64Ki increments, but this is
 ;; unwieldly in redex so we define the increment in bytes here
@@ -431,10 +433,30 @@
   [(F->v* ()) ϵ]
   [(F->v* (v v_0 ...)) (v (F->v* (v_0 ...)))])
 
+;; ctz / clz
+(define (clz n width)
+  (let loop ([pos (sub1 width)] [count 0])
+     (cond [(< pos 0) count]
+           [(not (bitwise-bit-set? n pos))
+            (loop (sub1 pos) (add1 count))]
+           [else count])))
+
+(define (ctz n width)
+  (let loop ([pos 0] [count 0])
+     (cond [(> pos (sub1 width)) count]
+           [(not (bitwise-bit-set? n pos))
+            (loop (add1 pos) (add1 count))]
+           [else count])))
+
 ;; implement primitives
 (define-metafunction wasm-runtime-lang
   do-unop : unop t c -> c
-  ;; TODO: integer ops
+  [(do-unop clz i32 c) ,(clz (term c) 32)]
+  [(do-unop clz i64 c) ,(clz (term c) 64)]
+  [(do-unop ctz i32 c) ,(ctz (term c) 32)]
+  [(do-unop ctz i32 c) ,(ctz (term c) 64)]
+  [(do-unop popcnt t-i c)
+   ,(bit-vector-popcount (string->bit-vector (number->string (term c) 2)))]
   [(do-unop neg t-f c) ,(- (term c))]
   [(do-unop abs t-f c) ,(abs (term c))]
   [(do-unop ceil t-f c) ,(ceiling (term c))]
@@ -443,27 +465,99 @@
   [(do-unop nearest t-f c) ,(round (term c))]
   [(do-unop sqrt t-f c) ,(sqrt (term c))])
 
+(define (clamp type const)
+  (cond [(< const 0)
+         (define start (if (eq? type 'i32) 32 64))
+         (define end (integer-length const))
+         (for/fold ([const const])
+                   ([i (in-range start end)])
+           (bitwise-and const (arithmetic-shift 1 i)))]
+        [else
+         (bitwise-and const
+                      (if (eq? type 'i32)
+                          #xFFFFFFFF
+                          #xFFFFFFFFFFFFFFFF))]))
+
 (define-metafunction wasm-runtime-lang
   do-binop : binop t c c -> c
-  ;; TODO: should handle overflow and such more properly
-  [(do-binop add t c_1 c_2) ,(+ (term c_1) (term c_2))]
-  [(do-binop sub t c_1 c_2) ,(- (term c_1) (term c_2))]
-  [(do-binop mul t c_1 c_2) ,(* (term c_1) (term c_2))]
-  [(do-binop and t-i c_1 c_2) ,(bitwise-and (term c_1) (term c_2))]
-  [(do-binop or t-i c_1 c_2) ,(bitwise-ior (term c_1) (term c_2))]
-  ;; TODO: more ops
-  )
+  [(do-binop add t-i c_1 c_2)   ,(clamp (term t-i) (+ (term c_1) (term c_2)))]
+  [(do-binop sub t-i c_1 c_2)   ,(clamp (term t-i) (- (term c_1) (term c_2)))]
+  [(do-binop mul t-i c_1 c_2)   ,(clamp (term t-i) (* (term c_1) (term c_2)))]
+  ;; FIXME: needs to account for sign and bit range properly
+  [(do-binop div-s t-i c_1 c_2) ,(quotient (term c_1) (term c_2))]
+  [(do-binop div-u t-i c_1 c_2) ,(quotient (term c_1) (term c_2))]
+  [(do-binop div-s t-i c_1 0)   #false]
+  [(do-binop div-u t-i c_1 0)   #false]
+  [(do-binop rem-s t-i c_1 c_2) ,(remainder (term c_1) (term c_2))]
+  [(do-binop rem-u t-i c_1 c_2) ,(remainder (term c_1) (term c_2))]
+  [(do-binop rem-s t-i c_1 0)   #false]
+  [(do-binop rem-u t-i c_1 0)   #false]
+  [(do-binop and t-i c_1 c_2)   ,(bitwise-and (term c_1) (term c_2))]
+  [(do-binop or t-i c_1 c_2)    ,(bitwise-ior (term c_1) (term c_2))]
+  [(do-binop shl t-i c_1 c_2)   ,(clamp (arithmetic-shift (term c_1) (term c_2)))]
+  [(do-binop shr-s t-i c_1 c_2) ,(arithmetic-shift (term c_1) (- (term c_2)))]
+  ;; FIXME: sign extension
+  [(do-binop shr-u t-i c_1 c_2) ,(arithmetic-shift (term c_1) (- (term c_2)))]
+  [(do-binop rotl i32 c_1 c_2)
+   ,(bitwise-rotate-bit-field (term c_1) 0 32 (term c_2))]
+  [(do-binop rotl i64 c_1 c_2)
+   ,(bitwise-rotate-bit-field (term c_1) 0 64 (term c_2))]
+  [(do-binop rotr i32 c_1 c_2)
+   ,(bitwise-rotate-bit-field (term c_1) 0 32 (- 32 (term c_2)))]
+  [(do-binop rotr i64 c_1 c_2)
+   ,(bitwise-rotate-bit-field (term c_1) 0 64 (- 64 (term c_2)))]
+  ;; FIXME: these cases aren't quite right at boundaries
+  [(do-binop add t-f c_1 c_2) ,(+ (term c_1) (term c_2))]
+  [(do-binop sub t-f c_1 c_2) ,(- (term c_1) (term c_2))]
+  [(do-binop mul t-f c_1 c_2) ,(* (term c_1) (term c_2))]
+  [(do-binop div t-f c_1 c_2) ,(/ (term c_1) (term c_2))]
+  [(do-binop min t-f c_1 c_2) ,(min (term c_1) (term c_2))]
+  [(do-binop max t-f c_1 c_2) ,(max (term c_1) (term c_2))]
+  [(do-binop copysign t-f c_1 c_2)
+   ;; FIXME: nan cases are tricky
+   ,(cond [(or (equal? (sgn (term c_1)) (sgn (term c_2)))
+               (zero? (term c_2)))
+           (term c_1)]
+          [else
+           (- (term c_1))])])
 
 (define-metafunction wasm-runtime-lang
   do-testop : testop t c -> c
   [(do-testop eqz t-i 0) 1]
   [(do-testop eqz t-i c) 0])
 
+(define (b->i bool) (if bool 1 0))
+
+(define (s->u int type)
+  (match type
+    ['i32 (integer-bytes->integer (integer->integer-bytes int 8 #t) #f #f 0 4)]
+    ['i64 (integer-bytes->integer (integer->integer-bytes int 8 #t) #f)]))
+
+(define (u->s int type)
+  (match type
+    ['i32 (integer-bytes->integer (integer->integer-bytes int 8 #f) #t #f 0 4)]
+    ['i64 (integer-bytes->integer (integer->integer-bytes int 8 #f) #t)]))
+
 (define-metafunction wasm-runtime-lang
   do-relop : relop t c c -> c
-  ;; TODO: integer ops
-  [(do-relop eq t c_1 c_2) ,(if (= (term c_1) (term c_2)) 1 0)]
-  [(do-relop ne t c_1 c_2) ,(if (= (term c_1) (term c_2)) 0 1)])
+  [(do-relop lt-s t-i c_1 c_2) ,(b->i (< (term c_1) (term c_2)))]
+  [(do-relop gt-s t-i c_1 c_2) ,(b->i (> (term c_1) (term c_2)))]
+  [(do-relop le-s t-i c_1 c_2) ,(b->i (<= (term c_1) (term c_2)))]
+  [(do-relop ge-s t-i c_1 c_2) ,(b->i (>= (term c_1) (term c_2)))]
+  [(do-relop lt-u t-i c_1 c_2) ,(b->i (< (s->u (term c_1) (term t-i))
+                                         (s->u (term c_2) (term t-i))))]
+  [(do-relop gt-u t-i c_1 c_2) ,(b->i (> (s->u (term c_1) (term t-i))
+                                         (s->u (term c_2) (term t-i))))]
+  [(do-relop le-u t-i c_1 c_2) ,(b->i (<= (s->u (term c_1) (term t-i))
+                                          (s->u (term c_2) (term t-i))))]
+  [(do-relop ge-u t-i c_1 c_2) ,(b->i (>= (s->u (term c_1) (term t-i))
+                                          (s->u (term c_2) (term t-i))))]
+  [(do-relop lt t-f c_1 c_2) ,(b->i (< (term c_1) (term c_2)))]
+  [(do-relop gt t-f c_1 c_2) ,(b->i (> (term c_2) (term c_2)))]
+  [(do-relop le t-f c_1 c_2) ,(b->i (<= (term c_1) (term c_2)))]
+  [(do-relop ge t-f c_1 c_2) ,(b->i (>= (term c_1) (term c_2)))]
+  [(do-relop eq t c_1 c_2) ,(b->i (= (term c_1) (term c_2)))]
+  [(do-relop ne t c_1 c_2) ,(b->i (not (= (term c_1) (term c_2))))])
 
 ;; helpers for pretty printing / drawing as stack picts
 (define (pp/pict state port width txt)
@@ -573,6 +667,7 @@
         binop)
    (==> ((const t c_1) ((const t c_2) ((binop t) e*)))
         (trap e*)
+        (where #false (do-binop binop t c_1 c_2))
         binop-trap)
 
    (==> ((const t c) ((testop t) e*))
@@ -862,6 +957,76 @@
                 (simple-config (seq (const i32 0))))
   (test-wasm--> (simple-config (seq (const i32 42) (const i32 42) (ne i32)))
                 (simple-config (seq (const i32 0))))
+
+  (test-wasm--> (simple-config (seq (const i32 1) (const i32 1) (add i32)))
+                (simple-config (seq (const i32 2))))
+  (test-wasm--> (simple-config (seq (const i32 1) (const i32 0) (add i32)))
+                (simple-config (seq (const i32 1))))
+  (test-wasm--> (simple-config (seq (const i32 -1) (const i32 -1) (add i32)))
+                (simple-config (seq (const i32 -2))))
+  (test-wasm--> (simple-config (seq (const i32 -1) (const i32 1) (add i32)))
+                (simple-config (seq (const i32 0))))
+  (test-wasm--> (simple-config (seq (const i32 #x7fffffff) (const i32 1) (add i32)))
+                (simple-config (seq (const i32 #x80000000))))
+  (test-wasm--> (simple-config (seq (const i32 #x80000000) (const i32 -1) (add i32)))
+                (simple-config (seq (const i32 #x7fffffff))))
+  (test-wasm--> (simple-config (seq (const i32 #x3fffffff) (const i32 1) (add i32)))
+                (simple-config (seq (const i32 #x40000000))))
+
+  (test-wasm--> (simple-config (seq (const i32 1) (const i32 1) (sub i32)))
+                (simple-config (seq (const i32 0))))
+  (test-wasm--> (simple-config (seq (const i32 1) (const i32 0) (sub i32)))
+                (simple-config (seq (const i32 1))))
+  (test-wasm--> (simple-config (seq (const i32 -1) (const i32 -1) (sub i32)))
+                (simple-config (seq (const i32 0))))
+  (test-wasm--> (simple-config (seq (const i32 #x7fffffff) (const i32 -1) (sub i32)))
+                (simple-config (seq (const i32 #x80000000))))
+  (test-wasm--> (simple-config (seq (const i32 #x80000000) (const i32 1) (sub i32)))
+                (simple-config (seq (const i32 #x7fffffff))))
+  (test-wasm--> (simple-config (seq (const i32 #x80000000) (const i32 #x80000000) (sub i32)))
+                (simple-config (seq (const i32 0))))
+  (test-wasm--> (simple-config (seq (const i32 #x3fffffff) (const i32 -1) (sub i32)))
+                (simple-config (seq (const i32 #x40000000))))
+
+  (test-wasm--> (simple-config (seq (const i32 1) (const i32 1) (mul i32)))
+                (simple-config (seq (const i32 1))))
+  (test-wasm--> (simple-config (seq (const i32 1) (const i32 0) (mul i32)))
+                (simple-config (seq (const i32 0))))
+  (test-wasm--> (simple-config (seq (const i32 -1) (const i32 -1) (mul i32)))
+                (simple-config (seq (const i32 1))))
+  (test-wasm--> (simple-config (seq (const i32 #x10000000) (const i32 4096) (mul i32)))
+                (simple-config (seq (const i32 0))))
+  (test-wasm--> (simple-config (seq (const i32 ,(u->s #x80000000 'i32)) (const i32 0) (mul i32)))
+                (simple-config (seq (const i32 0))))
+  ;; TODO: fix numerics corner case
+  #;
+  (test-wasm--> (simple-config (seq (const i32 ,(u->s #x80000000 'i32)) (const i32 -1) (mul i32)))
+                (simple-config (seq (const i32 ,(u->s #x80000000 'i32)))))
+  (test-wasm--> (simple-config (seq (const i32 #x7fffffff) (const i32 -1) (mul i32)))
+                (simple-config (seq (const i32 ,(u->s #x80000001 'i32)))))
+  (test-wasm--> (simple-config (seq (const i32 #x01234567) (const i32 #x76543210) (mul i32)))
+                (simple-config (seq (const i32 #x358e7470))))
+  (test-wasm--> (simple-config (seq (const i32 #x7fffffff) (const i32 #x7fffffff) (mul i32)))
+                (simple-config (seq (const i32 1))))
+
+  (test-wasm--> (simple-config (seq (const i32 #xabcd9876) (const i32 1) (rotl i32)))
+                (simple-config (seq (const i32 #x579b30ed))))
+
+  (test-wasm--> (simple-config (seq (const i32 #xff00cc00) (const i32 1) (rotr i32)))
+                (simple-config (seq (const i32 #x7f806600))))
+
+  (test-wasm--> (simple-config (seq (const i32 ,(u->s #x80000000 'i32)) (const i32 #x7fffffff) (gt-s i32)))
+                (simple-config (seq (const i32 0))))
+  (test-wasm--> (simple-config (seq (const i32 #x7fffffff) (const i32 ,(u->s #x80000000 'i32)) (gt-s i32)))
+                (simple-config (seq (const i32 1))))
+  (test-wasm--> (simple-config (seq (const i32 ,(u->s #x80000000 'i32)) (const i32 #x7fffffff) (le-s i32)))
+                (simple-config (seq (const i32 1))))
+  (test-wasm--> (simple-config (seq (const i32 #x7fffffff) (const i32 ,(u->s #x80000000 'i32)) (le-s i32)))
+                (simple-config (seq (const i32 0))))
+  (test-wasm--> (simple-config (seq (const i32 ,(u->s #x80000000 'i32)) (const i32 #x7fffffff) (le-u i32)))
+                (simple-config (seq (const i32 0))))
+  (test-wasm--> (simple-config (seq (const i32 #x7fffffff) (const i32 ,(u->s #x80000000 'i32)) (le-u i32)))
+                (simple-config (seq (const i32 1))))
 
   ;; test drop & select
   (test-wasm--> (simple-config (seq (const i32 42) drop))
